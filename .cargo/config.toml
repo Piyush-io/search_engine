@@ -1,0 +1,14 @@
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[alias]
+run-opt = "run --release"
+crawl-opt = "run --release --bin crawl"
+embed-opt = "run --release --bin embed"
+index-opt = "run --release --bin index"
+lexical-index-opt = "run --release --bin lexical_index"
+serve-opt = "run --release"
+stats-opt = "run --release --bin stats"
+bench-opt = "run --release --bin bench"
+merge-opt = "run --release --bin merge_db"
+clear-embeddings-opt = "run --release --bin clear_embeddings"

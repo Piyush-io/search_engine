@@ -1,0 +1,36 @@
+[package]
+name = "search_engine"
+version = "0.1.0"
+edition = "2024"
+default-run = "search_engine"
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+bincode = "1"
+futures = "0.3.31"
+kuchiki = "0.8.1"
+publicsuffix = "2"
+reqwest = { version = "0.13.1", features = ["json"] }
+rocksdb = "0.24.0"
+scraper = "0.25.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+time = "0.3.45"
+tokio = { version = "1", features = ["full"] }
+toml = "1.0.3"
+rayon = "1.11"
+tantivy = "0.25"
+fastembed = "4"
+bytemuck = "1.18"
+
+ureq = "3.1.4"
+url = "2.5.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

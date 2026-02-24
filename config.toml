@@ -1,0 +1,32 @@
+[crawl]
+max_pages = 50_000
+concurrency = 36
+rate_limit_ms = 350
+
+[embedding]
+model = "all-MiniLM-L6-v2"
+dim = 768
+batch_size = 256
+device = "coreml"          # "coreml" on M2 Mac, "cuda" on PC
+
+[hnsw]
+shards = 1
+m = 16
+ef_construction = 200
+ef_search = 50
+max_elements = 100_000
+
+[chunking]
+context_depth = 3          # how many heading levels to prepend
+
+[rocksdb]
+block_cache_mb = 256
+
+[server]
+port = 3000
+
+[paths]
+db_path = "./crawl_data"
+index_path = "./hnsw_index.bin"
+lexical_index_path = "./lexical_index"
+wiki_index_path = "./wiki_hnsw.bin"

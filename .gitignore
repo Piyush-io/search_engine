@@ -1,0 +1,7 @@
+target/
+.fastembed_cache/
+lexical_index/
+hnsw_index.bin
+wiki_hnsw.bin
+crawl_data/
+agents.md
