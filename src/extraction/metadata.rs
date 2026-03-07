@@ -37,10 +37,7 @@ pub fn extract(html: &str) -> PageMeta {
     }
 
     for meta in doc.select(&meta_sel) {
-        let name = meta
-            .value()
-            .attr("name")
-            .map(|v| v.to_ascii_lowercase());
+        let name = meta.value().attr("name").map(|v| v.to_ascii_lowercase());
         let property = meta
             .value()
             .attr("property")

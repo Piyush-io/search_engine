@@ -1,4 +1,3 @@
-
 // **** Task 7: Persistent Frontier with RocksDB with rate limiting per domain**** Goal : Add rate limiting per domain Extract domain from the URL, maintain per domain queues and wait 1s for link for same domain
 use rocksdb::{ColumnFamilyDescriptor, ColumnFamilyRef, DB, IteratorMode, Options};
 use scraper::{Html, Selector};

@@ -22,11 +22,23 @@ tokio = { version = "1", features = ["full"] }
 toml = "1.0.3"
 rayon = "1.11"
 tantivy = "0.25"
-fastembed = "4"
+fastembed = "=4.9.1"
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "coreml"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+ndarray = "0.16"
 bytemuck = "1.18"
+aes-gcm = "0.10"
+rand = "0.8"
+hnsw_rs = "0.3.3"
 
-ureq = "3.1.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5.8"
+rlimit = "0.11.0"
+ureq = "3.2.0"
+
+[profile.dev]
+opt-level = 1              # avoids OOM on large ML workloads in debug mode
 
 [profile.release]
 opt-level = 3

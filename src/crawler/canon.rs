@@ -48,8 +48,10 @@ pub fn canonicalize(raw: &str) -> Option<Url> {
 
     // Sort query params for deterministic dedupe.
     if url.query().is_some() {
-        let mut pairs: Vec<(String, String)> =
-            url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+        let mut pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
         pairs.sort_by(|a, b| a.cmp(b));
 
         if pairs.is_empty() {

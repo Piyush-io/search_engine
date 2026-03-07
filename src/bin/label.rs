@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
 use rocksdb::IteratorMode;
-use serde::Serialize;
 use search_engine::{Chunk, config, storage};
+use serde::Serialize;
 
 #[derive(Serialize)]
 struct LabelRecord {

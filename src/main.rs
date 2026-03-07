@@ -12,8 +12,12 @@ use sha2::{Digest, Sha256};
 
 use search_engine::{
     config,
+    embeddings::client,
     knowledge::panel,
-    search::{hnsw::HnswIndex, lexical::LexicalIndex, query},
+    search::{
+        bruteforce::BruteForceIndex, hnsw::HnswIndex, lexical::LexicalIndex, query,
+        vector_index::VectorIndex,
+    },
     storage,
     web::{serp, tracking},
 };
@@ -21,7 +25,7 @@ use search_engine::{
 #[derive(Clone)]
 struct AppState {
     db: Arc<rocksdb::DB>,
-    index: Arc<HnswIndex>,
+    index: Arc<dyn VectorIndex>,
     lexical: Option<Arc<LexicalIndex>>,
 }
 
@@ -38,20 +42,41 @@ struct ClickParams {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load()?;
+    println!("[server] {}", client::backend_info()?);
     let db = Arc::new(storage::open_db(&cfg.paths.db_path)?);
 
-    let index = match HnswIndex::load_from_path(&cfg.paths.index_path) {
-        Ok(idx) => idx,
-        Err(_) => HnswIndex::new(cfg.embedding.dim),
+    let index_backend = cfg.hnsw.backend.to_ascii_lowercase();
+    let index: Arc<dyn VectorIndex> = if index_backend == "bruteforce" {
+        let idx = match BruteForceIndex::load_from_path(&cfg.paths.index_path) {
+            Ok(idx) => idx,
+            Err(_) => BruteForceIndex::new(cfg.embedding.dim),
+        };
+        Arc::new(idx)
+    } else {
+        let idx = match HnswIndex::load_from_path(&cfg.paths.index_path) {
+            Ok(idx) => idx,
+            Err(_) => HnswIndex::with_params(
+                cfg.embedding.dim,
+                cfg.hnsw.m,
+                cfg.hnsw.ef_construction,
+                cfg.hnsw.ef_search,
+                cfg.hnsw.max_elements,
+            ),
+        };
+        Arc::new(idx)
     };
 
-    let lexical = LexicalIndex::open(&cfg.paths.lexical_index_path).ok().map(Arc::new);
+    println!(
+        "[server] vector backend={} entries={}",
+        index_backend,
+        index.len()
+    );
 
-    let state = AppState {
-        db,
-        index: Arc::new(index),
-        lexical,
-    };
+    let lexical = LexicalIndex::open(&cfg.paths.lexical_index_path)
+        .ok()
+        .map(Arc::new);
+
+    let state = AppState { db, index, lexical };
 
     let app = Router::new()
         .route("/", get(home_handler))
@@ -82,13 +107,17 @@ async fn search_handler(
 
     let results = query::run_query(
         &state.db,
-        &state.index,
+        state.index.as_ref(),
         state.lexical.as_deref(),
         &query_text,
         10,
     );
     let panel = panel::build_panel(&state.db, &query_text);
-    Html(serp::render_results_page(&query_text, &results, panel.as_ref()))
+    Html(serp::render_results_page(
+        &query_text,
+        &results,
+        panel.as_ref(),
+    ))
 }
 
 async fn act_handler(

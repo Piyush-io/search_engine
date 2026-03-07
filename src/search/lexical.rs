@@ -48,9 +48,7 @@ impl LexicalIndex {
         let chunk_id_field = schema
             .get_field("chunk_id")
             .map_err(|_| "missing field chunk_id")?;
-        let text_field = schema
-            .get_field("text")
-            .map_err(|_| "missing field text")?;
+        let text_field = schema.get_field("text").map_err(|_| "missing field text")?;
         let heading_field = schema
             .get_field("heading")
             .map_err(|_| "missing field heading")?;
@@ -58,7 +56,10 @@ impl LexicalIndex {
             .get_field("source_url")
             .map_err(|_| "missing field source_url")?;
 
-        let reader = index.reader_builder().reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay).try_into()?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
 
         Ok(Self {
             index,
@@ -70,7 +71,10 @@ impl LexicalIndex {
         })
     }
 
-    pub fn writer(&self, heap_size_bytes: usize) -> Result<tantivy::IndexWriter, Box<dyn std::error::Error>> {
+    pub fn writer(
+        &self,
+        heap_size_bytes: usize,
+    ) -> Result<tantivy::IndexWriter, Box<dyn std::error::Error>> {
         Ok(self.index.writer(heap_size_bytes)?)
     }
 
@@ -83,13 +87,20 @@ impl LexicalIndex {
         )
     }
 
-    pub fn search(&self, query_text: &str, k: usize) -> Result<Vec<(ChunkId, f32)>, Box<dyn std::error::Error>> {
+    pub fn search(
+        &self,
+        query_text: &str,
+        k: usize,
+    ) -> Result<Vec<(ChunkId, f32)>, Box<dyn std::error::Error>> {
         if k == 0 {
             return Ok(Vec::new());
         }
 
         let searcher = self.reader.searcher();
-        let mut parser = QueryParser::for_index(&self.index, vec![self.text_field, self.heading_field, self.source_url_field]);
+        let mut parser = QueryParser::for_index(
+            &self.index,
+            vec![self.text_field, self.heading_field, self.source_url_field],
+        );
         parser.set_conjunction_by_default();
         let q = parser.parse_query(query_text)?;
 

@@ -70,6 +70,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("[wiki_ingest] done. inserted={} source={}", inserted, input_path);
+    println!(
+        "[wiki_ingest] done. inserted={} source={}",
+        inserted, input_path
+    );
     Ok(())
 }

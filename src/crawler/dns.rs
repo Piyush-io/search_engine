@@ -1,6 +1,9 @@
 use std::{io, net::IpAddr};
 
-use tokio::{net::lookup_host, time::{Duration, sleep}};
+use tokio::{
+    net::lookup_host,
+    time::{Duration, sleep},
+};
 
 /// Return true if the IP falls in a private / loopback / link-local range.
 pub fn is_private(ip: IpAddr) -> bool {

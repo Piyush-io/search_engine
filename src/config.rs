@@ -20,14 +20,30 @@ pub struct CrawlConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EmbeddingConfig {
+    pub backend: String,
     pub model: String,
     pub dim: usize,
     pub batch_size: usize,
-    pub device: String,
+    pub max_length: Option<usize>,
+    /// Number of parallel ORT sessions used during bulk embedding (embed binary only).
+    /// Default: 2. Each session uses `bulk_intra_threads` intra-op threads.
+    #[serde(default = "default_bulk_workers")]
+    pub bulk_workers: usize,
+    /// Intra-op thread count per bulk session. Default: 4.
+    #[serde(default = "default_bulk_intra_threads")]
+    pub bulk_intra_threads: usize,
+}
+
+fn default_bulk_workers() -> usize {
+    2
+}
+fn default_bulk_intra_threads() -> usize {
+    4
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HnswConfig {
+    pub backend: String,
     pub shards: usize,
     pub m: usize,
     pub ef_construction: usize,

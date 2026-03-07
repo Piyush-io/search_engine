@@ -119,8 +119,8 @@ fn host_allowed(host: &str) -> bool {
 fn path_looks_binary(path: &str) -> bool {
     let p = path.to_ascii_lowercase();
     [
-        ".tar", ".tar.gz", ".tgz", ".zip", ".7z", ".gz", ".xz", ".bz2", ".pdf", ".png",
-        ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".mp4", ".mp3", ".woff", ".woff2", ".ttf",
+        ".tar", ".tar.gz", ".tgz", ".zip", ".7z", ".gz", ".xz", ".bz2", ".pdf", ".png", ".jpg",
+        ".jpeg", ".gif", ".webp", ".svg", ".mp4", ".mp3", ".woff", ".woff2", ".ttf",
     ]
     .iter()
     .any(|ext| p.ends_with(ext))
@@ -314,7 +314,11 @@ fn obey_domain_rate_limit(
 
 fn update_domain_visit(db: &rocksdb::DB, domain: &str) -> Result<(), Box<dyn std::error::Error>> {
     let domains_cf = storage::cf(db, storage::CF_DOMAINS)?;
-    db.put_cf(domains_cf, domain.as_bytes(), now_ms().to_string().as_bytes())?;
+    db.put_cf(
+        domains_cf,
+        domain.as_bytes(),
+        now_ms().to_string().as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -365,7 +369,7 @@ fn store_page_and_chunks(
     wb.put_cf(content_cf, page.url.as_bytes(), serde_json::to_vec(&page)?);
 
     let mut chunk_count = 0usize;
-    let mut preceding: Vec<String> = Vec::new();
+    let mut preceding_sentences: Vec<String> = Vec::new();
 
     for block in &page.blocks {
         if chunk_count >= MAX_CHUNKS_PER_PAGE {
@@ -378,26 +382,27 @@ fn store_page_and_chunks(
                 break;
             }
 
-            let with_headings = context::with_context_depth(
+            let (chained_sentence, is_leaf) =
+                chaining::apply_statement_chaining(&sentence, &preceding_sentences);
+            let final_text = context::with_context_depth(
                 &block.heading_chain,
-                &sentence,
+                &chained_sentence,
                 cfg.chunking.context_depth,
             );
-            let (final_text, is_leaf) = chaining::apply_statement_chaining(&with_headings, &preceding);
             let chunk_id = make_chunk_id(&page.url, chunk_count);
 
             let chunk = Chunk {
                 id: chunk_id.clone(),
                 source_url: page.url.clone(),
                 heading_chain: block.heading_chain.clone(),
-                text: final_text.clone(),
+                text: final_text,
                 is_leaf,
             };
 
             wb.put_cf(chunks_cf, chunk_id.as_bytes(), serde_json::to_vec(&chunk)?);
-            preceding.push(final_text);
-            if preceding.len() > 3 {
-                preceding.remove(0);
+            preceding_sentences.push(sentence);
+            if preceding_sentences.len() > 4 {
+                preceding_sentences.remove(0);
             }
             chunk_count += 1;
         }
@@ -424,22 +429,46 @@ async fn process_one(
     dns_ok_cache: Arc<Mutex<HashMap<String, bool>>>,
 ) -> CrawlOutcome {
     if is_seen(&db, &raw_url).unwrap_or(false) {
-        return CrawlOutcome { processed: false, url: raw_url, chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: raw_url,
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     }
 
     let Some(url) = canon::canonicalize(&raw_url) else {
         let _ = mark_seen(&db, &raw_url);
-        return CrawlOutcome { processed: false, url: raw_url, chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: raw_url,
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     };
 
     let Some(domain) = url.host_str() else {
         let _ = mark_seen(&db, url.as_str());
-        return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: url.to_string(),
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     };
 
     if !url_allowed(&url) {
         let _ = mark_seen(&db, url.as_str());
-        return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: url.to_string(),
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     }
 
     let current_count = per_domain_processed
@@ -449,7 +478,13 @@ async fn process_one(
         .unwrap_or(0);
     if current_count >= domain_cap(domain) {
         let _ = mark_seen(&db, url.as_str());
-        return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: url.to_string(),
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     }
 
     if let Ok(Some(wait)) = obey_domain_rate_limit(&db, domain, cfg.crawl.rate_limit_ms) {
@@ -475,13 +510,27 @@ async fn process_one(
 
     if !dns_pass {
         let _ = mark_seen(&db, url.as_str());
-        return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: url.to_string(),
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     }
 
-    let disallowed = robots::get_disallowed(domain, &db).await.unwrap_or_default();
+    let disallowed = robots::get_disallowed(domain, &db)
+        .await
+        .unwrap_or_default();
     if !robots::is_allowed(url.path(), &disallowed) {
         let _ = mark_seen(&db, url.as_str());
-        return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+        return CrawlOutcome {
+            processed: false,
+            url: url.to_string(),
+            chunks: 0,
+            discovered: 0,
+            host: None,
+        };
     }
 
     let body = match client.get(url.as_str()).send().await {
@@ -492,10 +541,18 @@ async fn process_one(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            if !content_type.contains("text/html") && !content_type.contains("application/xhtml+xml") {
+            if !content_type.contains("text/html")
+                && !content_type.contains("application/xhtml+xml")
+            {
                 let _ = mark_seen(&db, url.as_str());
                 let _ = update_domain_visit(&db, domain);
-                return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+                return CrawlOutcome {
+                    processed: false,
+                    url: url.to_string(),
+                    chunks: 0,
+                    discovered: 0,
+                    host: None,
+                };
             }
 
             match resp.text().await {
@@ -503,20 +560,33 @@ async fn process_one(
                 Err(_) => {
                     let _ = mark_seen(&db, url.as_str());
                     let _ = update_domain_visit(&db, domain);
-                    return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+                    return CrawlOutcome {
+                        processed: false,
+                        url: url.to_string(),
+                        chunks: 0,
+                        discovered: 0,
+                        host: None,
+                    };
                 }
             }
         }
         _ => {
             let _ = mark_seen(&db, url.as_str());
             let _ = update_domain_visit(&db, domain);
-            return CrawlOutcome { processed: false, url: url.to_string(), chunks: 0, discovered: 0, host: None };
+            return CrawlOutcome {
+                processed: false,
+                url: url.to_string(),
+                chunks: 0,
+                discovered: 0,
+                host: None,
+            };
         }
     };
 
     let page = normalizer::normalize(&body, url.as_str());
     let chunk_count = store_page_and_chunks(&db, &cfg, page).unwrap_or(0);
-    let discovered = add_sub_links_to_frontier(&db, &url, &body, &per_domain_processed).unwrap_or(0);
+    let discovered =
+        add_sub_links_to_frontier(&db, &url, &body, &per_domain_processed).unwrap_or(0);
 
     let _ = mark_seen(&db, url.as_str());
     let _ = update_domain_visit(&db, domain);
@@ -601,7 +671,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let client = client.clone();
             let per_domain_processed = Arc::clone(&per_domain_processed);
             let dns_ok_cache = Arc::clone(&dns_ok_cache);
-            async move { process_one(db, cfg, client, raw_url, per_domain_processed, dns_ok_cache).await }
+            async move {
+                process_one(db, cfg, client, raw_url, per_domain_processed, dns_ok_cache).await
+            }
         }))
         .buffer_unordered(cfg.crawl.concurrency.max(1));
 
@@ -618,7 +690,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let total_processed = existing_pages + processed_this_run;
                 println!(
                     "[crawl] processed_this_run={} total={} url={} chunks={} discovered_links={}",
-                    processed_this_run, total_processed, outcome.url, outcome.chunks, outcome.discovered
+                    processed_this_run,
+                    total_processed,
+                    outcome.url,
+                    outcome.chunks,
+                    outcome.discovered
                 );
 
                 if existing_pages + processed_this_run >= cfg.crawl.max_pages {

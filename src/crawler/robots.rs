@@ -55,11 +55,17 @@ pub async fn get_disallowed(
         }
     }
 
-    db.put_cf(robots_cf, domain.as_bytes(), disallowed.join("\n").as_bytes())?;
+    db.put_cf(
+        robots_cf,
+        domain.as_bytes(),
+        disallowed.join("\n").as_bytes(),
+    )?;
     Ok(disallowed)
 }
 
 /// Return true if `path` is allowed to crawl given the disallow list.
 pub fn is_allowed(path: &str, disallowed: &[String]) -> bool {
-    !disallowed.iter().any(|rule| !rule.is_empty() && path.starts_with(rule))
+    !disallowed
+        .iter()
+        .any(|rule| !rule.is_empty() && path.starts_with(rule))
 }

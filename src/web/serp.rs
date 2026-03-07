@@ -23,9 +23,15 @@ pub fn render_home_page() -> String {
         .to_string()
 }
 
-pub fn render_results_page(query: &str, results: &[SearchResult], panel: Option<&WikiRecord>) -> String {
+pub fn render_results_page(
+    query: &str,
+    results: &[SearchResult],
+    panel: Option<&WikiRecord>,
+) -> String {
     let mut html = String::new();
-    html.push_str("<!doctype html><html><head><meta charset=\"utf-8\"><title>Results</title></head><body>");
+    html.push_str(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Results</title></head><body>",
+    );
     html.push_str("<form action=\"/search\" method=\"get\">");
     html.push_str(&format!(
         "<input type=\"text\" name=\"q\" value=\"{}\" style=\"width:420px\"/>",
@@ -44,7 +50,10 @@ pub fn render_results_page(query: &str, results: &[SearchResult], panel: Option<
             let context = if r.heading_chain.is_empty() {
                 String::new()
             } else {
-                format!("<div style=\"color:#666;font-size:12px\">{}</div>", escape_html(&r.heading_chain.join(" › ")))
+                format!(
+                    "<div style=\"color:#666;font-size:12px\">{}</div>",
+                    escape_html(&r.heading_chain.join(" › "))
+                )
             };
             html.push_str("<article style=\"margin:14px 0;padding-bottom:10px;border-bottom:1px solid #ddd\">");
             html.push_str(&context);
@@ -73,7 +82,10 @@ pub fn render_results_page(query: &str, results: &[SearchResult], panel: Option<
         }
         html.push_str(&format!("<p>{}</p>", escape_html(&k.summary)));
         if let Some(image_url) = &k.image_url {
-            html.push_str(&format!("<img src=\"{}\" style=\"max-width:100%\"/>", escape_html(image_url)));
+            html.push_str(&format!(
+                "<img src=\"{}\" style=\"max-width:100%\"/>",
+                escape_html(image_url)
+            ));
         }
     } else {
         html.push_str("<h3>Knowledge Panel</h3><p>No panel match.</p>");

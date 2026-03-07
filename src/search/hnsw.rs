@@ -1,6 +1,6 @@
-use std::{cmp::Ordering, fs};
+use std::fs;
 
-use rayon::prelude::*;
+use hnsw_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{ChunkId, EmbeddingVec};
@@ -11,20 +11,47 @@ struct Entry {
     vector: Vec<f32>,
 }
 
-/// Brute-force index fallback behind the Week 4 `hnsw` module boundary.
-///
-/// Keeps the same role as HNSW wrapper, but uses linear scan for now.
-/// Optimized with multicore top-k reduction to reduce query latency.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedIndex {
+    dim: usize,
+    m: usize,
+    ef_construction: usize,
+    ef_search: usize,
+    max_elements: usize,
+    entries: Vec<Entry>,
+}
+
+/// Real ANN index backed by hnsw_rs.
 pub struct HnswIndex {
     dim: usize,
+    m: usize,
+    ef_construction: usize,
+    ef_search: usize,
+    max_elements: usize,
+    hnsw: Hnsw<'static, f32, DistCosine>,
     entries: Vec<Entry>,
 }
 
 impl HnswIndex {
     pub fn new(dim: usize) -> Self {
+        Self::with_params(dim, 16, 200, 80, 100_000)
+    }
+
+    pub fn with_params(
+        dim: usize,
+        m: usize,
+        ef_construction: usize,
+        ef_search: usize,
+        max_elements: usize,
+    ) -> Self {
+        let hnsw = make_hnsw(m, ef_construction, max_elements);
         Self {
             dim,
+            m,
+            ef_construction,
+            ef_search,
+            max_elements,
+            hnsw,
             entries: Vec::new(),
         }
     }
@@ -33,94 +60,89 @@ impl HnswIndex {
         self.entries.len()
     }
 
+    pub fn set_ef_search(&mut self, ef_search: usize) {
+        self.ef_search = ef_search.max(1);
+    }
+
     pub fn insert(&mut self, chunk_id: ChunkId, vector: EmbeddingVec) {
-        self.entries.push(Entry {
-            chunk_id,
-            vector: vector.to_vec(),
-        });
+        if vector.len() != self.dim {
+            return;
+        }
+
+        let idx = self.entries.len();
+        self.hnsw.insert((vector.as_slice(), idx));
+        self.entries.push(Entry { chunk_id, vector });
     }
 
     pub fn search(&self, query: &EmbeddingVec, k: usize) -> Vec<(ChunkId, f32)> {
-        if k == 0 || self.entries.is_empty() {
+        if k == 0 || self.entries.is_empty() || query.len() != self.dim {
             return Vec::new();
         }
 
-        let chunk_size = 4096usize;
-        let partial = self
-            .entries
-            .par_chunks(chunk_size)
-            .map(|chunk| {
-                let mut local_top = Vec::with_capacity(k);
-                for e in chunk {
-                    let score = cosine(query, &e.vector);
-                    push_top_k(&mut local_top, (e.chunk_id.clone(), score), k);
-                }
-                local_top
-            })
-            .collect::<Vec<_>>();
+        let ef = self.ef_search.max(k);
+        let neighbours = self.hnsw.search(query.as_slice(), k, ef);
 
-        let mut top = Vec::with_capacity(k);
-        for part in partial {
-            for cand in part {
-                push_top_k(&mut top, cand, k);
+        let mut out = Vec::with_capacity(neighbours.len());
+        for n in neighbours {
+            let idx = n.d_id;
+            if let Some(e) = self.entries.get(idx) {
+                let sim = (1.0_f32 - n.distance).clamp(-1.0, 1.0);
+                out.push((e.chunk_id.clone(), sim));
             }
         }
 
-        top.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
-        top
+        out
     }
 
     pub fn save_to_path(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let bytes = bincode::serialize(self)?;
+        let persisted = PersistedIndex {
+            dim: self.dim,
+            m: self.m,
+            ef_construction: self.ef_construction,
+            ef_search: self.ef_search,
+            max_elements: self.max_elements,
+            entries: self.entries.clone(),
+        };
+
+        let bytes = bincode::serialize(&persisted)?;
         fs::write(path, bytes)?;
         Ok(())
     }
 
     pub fn load_from_path(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let bytes = fs::read(path)?;
-        let idx: Self = bincode::deserialize(&bytes)?;
+        let persisted: PersistedIndex = bincode::deserialize(&bytes)?;
+
+        let mut idx = Self::with_params(
+            persisted.dim,
+            persisted.m,
+            persisted.ef_construction,
+            persisted.ef_search,
+            persisted.max_elements.max(persisted.entries.len()),
+        );
+
+        for e in persisted.entries {
+            idx.insert(e.chunk_id, e.vector);
+        }
+
         Ok(idx)
     }
 }
 
-fn push_top_k(top: &mut Vec<(ChunkId, f32)>, cand: (ChunkId, f32), k: usize) {
-    if top.len() < k {
-        top.push(cand);
-        return;
-    }
+fn make_hnsw(
+    m: usize,
+    ef_construction: usize,
+    max_elements: usize,
+) -> Hnsw<'static, f32, DistCosine> {
+    let max_nb_connection = m.max(4);
+    let nb_elem = max_elements.max(1);
+    let nb_layer = 16.min((nb_elem as f32).ln().trunc().max(1.0) as usize);
 
-    let mut min_idx = 0usize;
-    let mut min_score = top[0].1;
-    for (i, (_, s)) in top.iter().enumerate().skip(1) {
-        if *s < min_score {
-            min_score = *s;
-            min_idx = i;
-        }
-    }
-
-    if cand.1 > min_score {
-        top[min_idx] = cand;
-    }
-}
-
-fn cosine(a: &EmbeddingVec, b: &[f32]) -> f32 {
-    if b.len() != a.len() {
-        return 0.0;
-    }
-
-    let mut dot = 0.0;
-    let mut an = 0.0;
-    let mut bn = 0.0;
-
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        an += a[i] * a[i];
-        bn += b[i] * b[i];
-    }
-
-    if an == 0.0 || bn == 0.0 {
-        0.0
-    } else {
-        dot / (an.sqrt() * bn.sqrt())
-    }
+    Hnsw::<f32, DistCosine>::new(
+        max_nb_connection,
+        nb_elem,
+        nb_layer,
+        ef_construction.max(max_nb_connection),
+        DistCosine {},
+    )
 }

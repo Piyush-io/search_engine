@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// Unique identifier for a chunk: hash of (source_url + position_index)
 pub type ChunkId = String;
 
-/// A 768-dimensional sentence embedding from multi-qa-mpnet-base-dot-v1
-pub type EmbeddingVec = [f32; 768];
+/// Dense embedding vector produced by the configured embedding model.
+pub type EmbeddingVec = Vec<f32>;
 
 /// A single content block extracted from a page, with its heading context
 #[derive(Debug, Clone, Serialize, Deserialize)]

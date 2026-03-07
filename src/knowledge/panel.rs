@@ -1,39 +1,59 @@
+use std::{collections::HashMap, io, sync::OnceLock};
+
 use rocksdb::{DB, IteratorMode};
 
-use crate::{knowledge::wikipedia::WikiRecord, storage};
+use crate::{
+    config, embeddings::client, knowledge::wikipedia::WikiRecord, search::hnsw::HnswIndex, storage,
+};
 
-/// Very lightweight lexical panel matcher over stored wiki records.
-pub fn build_panel(db: &DB, query: &str) -> Option<WikiRecord> {
-    let wiki_cf = storage::cf(db, storage::CF_WIKI).ok()?;
-    let q = query.to_ascii_lowercase();
+struct WikiPanelState {
+    index: HnswIndex,
+    records: HashMap<String, WikiRecord>,
+}
 
-    let mut best: Option<(i32, WikiRecord)> = None;
+static WIKI_PANEL_STATE: OnceLock<Result<WikiPanelState, String>> = OnceLock::new();
 
+fn load_panel_state(db: &DB) -> Result<WikiPanelState, Box<dyn std::error::Error>> {
+    let cfg = config::load()?;
+
+    let index = HnswIndex::load_from_path(&cfg.paths.wiki_index_path)?;
+
+    let wiki_cf = storage::cf(db, storage::CF_WIKI)?;
+    let mut records = HashMap::new();
     for item in db.iterator_cf(wiki_cf, IteratorMode::Start) {
-        let (_, value) = item.ok()?;
-        let rec: WikiRecord = serde_json::from_slice(&value).ok()?;
+        let (_, value) = item?;
+        let rec: WikiRecord = serde_json::from_slice(&value)?;
+        records.insert(rec.title.to_ascii_lowercase(), rec);
+    }
 
-        let mut score = 0;
-        let title_l = rec.title.to_ascii_lowercase();
-        let summary_l = rec.summary.to_ascii_lowercase();
+    Ok(WikiPanelState { index, records })
+}
 
-        if title_l == q {
-            score += 100;
-        }
-        if title_l.contains(&q) {
-            score += 40;
-        }
-        if summary_l.contains(&q) {
-            score += 10;
+fn state(db: &DB) -> Result<&'static WikiPanelState, Box<dyn std::error::Error>> {
+    let res = WIKI_PANEL_STATE
+        .get_or_init(|| load_panel_state(db).map_err(|e| format!("wiki panel init failed: {e}")));
+
+    match res {
+        Ok(s) => Ok(s),
+        Err(msg) => Err(io::Error::other(msg.clone()).into()),
+    }
+}
+
+/// ANN-backed wiki panel matcher.
+pub fn build_panel(db: &DB, query: &str) -> Option<WikiRecord> {
+    let query_vec = client::embed(query).ok()?;
+    let st = state(db).ok()?;
+
+    let hits = st.index.search(&query_vec, 3);
+    for (wiki_key, score) in hits {
+        if score < 0.35 {
+            continue;
         }
 
-        if score > 0 {
-            match &best {
-                Some((best_score, _)) if *best_score >= score => {}
-                _ => best = Some((score, rec)),
-            }
+        if let Some(rec) = st.records.get(&wiki_key.to_ascii_lowercase()) {
+            return Some(rec.clone());
         }
     }
 
-    best.map(|(_, rec)| rec)
+    None
 }

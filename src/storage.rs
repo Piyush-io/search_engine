@@ -1,4 +1,4 @@
-use rocksdb::{ColumnFamilyDescriptor, Options, DB};
+use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 
 pub const CF_SEEN: &str = "seen";
 pub const CF_TO_CRAWL: &str = "to_crawl";
@@ -9,6 +9,7 @@ pub const CF_CHUNKS: &str = "chunks";
 pub const CF_EMBEDDINGS: &str = "embeddings";
 pub const CF_CLICKS: &str = "clicks";
 pub const CF_WIKI: &str = "wiki";
+pub const CF_WIKI_EMBEDDINGS: &str = "wiki_embeddings";
 
 pub fn all_cf_names() -> Vec<&'static str> {
     vec![
@@ -21,52 +22,118 @@ pub fn all_cf_names() -> Vec<&'static str> {
         CF_EMBEDDINGS,
         CF_CLICKS,
         CF_WIKI,
+        CF_WIKI_EMBEDDINGS,
     ]
 }
 
+/// Normal open: balanced read/write tuning, shared block cache.
+/// Use for the server and index binaries.
 pub fn open_db(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
+    open_db_internal(path, DbProfile::Normal)
+}
+
+/// Bulk-write open: small write buffers, no block cache.
+/// Use for embed / wiki_embed to keep memory under control.
+pub fn open_db_for_bulk_write(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
+    open_db_internal(path, DbProfile::BulkWrite)
+}
+
+pub fn open_db_read_only(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
+    let _ = rlimit::increase_nofile_limit(10240);
+
     let mut db_options = Options::default();
-    db_options.create_if_missing(true);
-    db_options.set_error_if_exists(false);
-    db_options.create_missing_column_families(true);
+    db_options.set_allow_mmap_reads(true);
+
+    let cf_names = DB::list_cf(&db_options, path)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| all_cf_names().into_iter().map(|s| s.to_string()).collect());
+
+    let db = DB::open_cf_for_read_only(&db_options, path, cf_names, false)?;
+    Ok(db)
+}
+
+pub fn cf<'a>(
+    db: &'a DB,
+    name: &str,
+) -> Result<rocksdb::ColumnFamilyRef<'a>, Box<dyn std::error::Error>> {
+    db.cf_handle(name)
+        .ok_or_else(|| format!("missing column family: {name}").into())
+}
+
+// ── internals ──────────────────────────────────────────────────────────────
+
+enum DbProfile {
+    Normal,
+    BulkWrite,
+}
+
+fn open_db_internal(path: &str, profile: DbProfile) -> Result<DB, Box<dyn std::error::Error>> {
+    let _ = rlimit::increase_nofile_limit(10240);
 
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
         .unwrap_or(4);
-    db_options.increase_parallelism(cpus);
-    db_options.set_max_background_jobs(cpus);
-    db_options.optimize_level_style_compaction(512 * 1024 * 1024);
-    db_options.set_allow_mmap_reads(true);
 
-    let mut cf_ops = Options::default();
-    cf_ops.set_write_buffer_size(64 * 1024 * 1024);
-    cf_ops.set_max_write_buffer_number(4);
-    cf_ops.set_target_file_size_base(64 * 1024 * 1024);
+    let mut db_opts = Options::default();
+    db_opts.create_if_missing(true);
+    db_opts.set_error_if_exists(false);
+    db_opts.create_missing_column_families(true);
+    db_opts.set_allow_mmap_reads(true);
+    db_opts.increase_parallelism(cpus);
 
-    let descriptors = vec![
-        ColumnFamilyDescriptor::new(CF_SEEN, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_TO_CRAWL, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_DOMAINS, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_ROBOTS, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_CONTENT, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_CHUNKS, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_EMBEDDINGS, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_CLICKS, cf_ops.clone()),
-        ColumnFamilyDescriptor::new(CF_WIKI, cf_ops),
-    ];
+    match profile {
+        DbProfile::Normal => {
+            db_opts.set_max_background_jobs(cpus);
+            db_opts.optimize_level_style_compaction(256 * 1024 * 1024);
+        }
+        DbProfile::BulkWrite => {
+            // During bulk embed we write sequentially and don't read much.
+            // Keep background jobs low to leave cores for the ORT model.
+            db_opts.set_max_background_jobs(2);
+            db_opts.optimize_level_style_compaction(64 * 1024 * 1024);
+            // Avoid pinning every SST descriptor for long-running bulk jobs.
+            db_opts.set_max_open_files(512);
+        }
+    }
 
-    let db = DB::open_cf_descriptors(&db_options, path, descriptors)?;
+    let cf_ops = cf_options(&profile);
+
+    let descriptors: Vec<ColumnFamilyDescriptor> = all_cf_names()
+        .into_iter()
+        .map(|name| ColumnFamilyDescriptor::new(name, cf_ops.clone()))
+        .collect();
+
+    let db = DB::open_cf_descriptors(&db_opts, path, descriptors)?;
     Ok(db)
 }
 
-pub fn open_db_read_only(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
-    let mut db_options = Options::default();
-    db_options.set_allow_mmap_reads(true);
-    let db = DB::open_cf_for_read_only(&db_options, path, all_cf_names(), false)?;
-    Ok(db)
-}
+fn cf_options(profile: &DbProfile) -> Options {
+    let mut opts = Options::default();
 
-pub fn cf<'a>(db: &'a DB, name: &str) -> Result<rocksdb::ColumnFamilyRef<'a>, Box<dyn std::error::Error>> {
-    db.cf_handle(name)
-        .ok_or_else(|| format!("missing column family: {name}").into())
+    match profile {
+        DbProfile::Normal => {
+            // Shared block cache across all CFs — 128 MB total.
+            let cache = Cache::new_lru_cache(128 * 1024 * 1024);
+            let mut bb_opts = BlockBasedOptions::default();
+            bb_opts.set_block_cache(&cache);
+            bb_opts.set_bloom_filter(10.0, false);
+            opts.set_block_based_table_factory(&bb_opts);
+
+            opts.set_write_buffer_size(32 * 1024 * 1024); // 32 MB per CF
+            opts.set_max_write_buffer_number(2);
+            opts.set_target_file_size_base(64 * 1024 * 1024);
+        }
+        DbProfile::BulkWrite => {
+            // No block cache — we're not doing reads.
+            // Tiny write buffers to cap RAM usage.
+            opts.set_write_buffer_size(8 * 1024 * 1024); // 8 MB per CF
+            opts.set_max_write_buffer_number(2);
+            opts.set_target_file_size_base(64 * 1024 * 1024);
+            // WAL is already disabled per-write in embed.rs; this is a safety net.
+            opts.set_disable_auto_compactions(true);
+        }
+    }
+
+    opts
 }
