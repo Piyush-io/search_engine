@@ -1,7 +1,9 @@
 use std::{io, str::FromStr, sync::OnceLock};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use ort::execution_providers::{CoreMLExecutionProvider, ExecutionProviderDispatch};
+use ort::execution_providers::ExecutionProviderDispatch;
+#[cfg(target_os = "macos")]
+use ort::execution_providers::CoreMLExecutionProvider;
 
 use crate::{EmbeddingVec, config};
 
@@ -25,6 +27,10 @@ fn parse_model_name(raw: &str) -> Result<EmbeddingModel, String> {
         "all-minilm-l12-v2" => Some(EmbeddingModel::AllMiniLML12V2),
         "all-minilm-l12-v2-q" => Some(EmbeddingModel::AllMiniLML12V2Q),
         "paraphrase-mpnet-base-v2" => Some(EmbeddingModel::ParaphraseMLMpnetBaseV2),
+        "bge-small-en-v1.5" => Some(EmbeddingModel::BGESmallENV15),
+        "bge-small-en-v1.5-q" => Some(EmbeddingModel::BGESmallENV15Q),
+        "bge-base-en-v1.5" => Some(EmbeddingModel::BGEBaseENV15),
+        "bge-base-en-v1.5-q" => Some(EmbeddingModel::BGEBaseENV15Q),
         _ => None,
     };
 
@@ -35,17 +41,52 @@ fn parse_model_name(raw: &str) -> Result<EmbeddingModel, String> {
     EmbeddingModel::from_str(raw)
 }
 
+#[cfg(target_os = "macos")]
 fn coreml_providers() -> Vec<ExecutionProviderDispatch> {
     vec![
-        // Prefer ANE (Apple Neural Engine) when available; falls back to GPU then CPU.
         CoreMLExecutionProvider::default().build(),
     ]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cuda_providers() -> Vec<ExecutionProviderDispatch> {
+    use ort::execution_providers::CUDAExecutionProvider;
+    vec![CUDAExecutionProvider::default().build()]
+}
+
+/// Auto-detect the best backend for the current platform.
+fn detect_backend() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { return "coreml"; }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if std::env::var("CUDA_PATH").is_ok() || which_exists("nvidia-smi") {
+            return "cuda";
+        }
+        "cpu"
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn which_exists(name: &str) -> bool {
+    use std::process::Command;
+    Command::new(name)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
 }
 
 fn init_model() -> Result<ModelState, String> {
     let cfg = config::load().map_err(|e| format!("failed loading config.toml: {e}"))?;
 
-    let backend = cfg.embedding.backend.trim().to_ascii_lowercase();
+    let raw_backend = cfg.embedding.backend.trim().to_ascii_lowercase();
+    let backend = if raw_backend == "auto" || raw_backend == "fastembed" {
+        detect_backend().to_string()
+    } else {
+        raw_backend
+    };
 
     let parsed = parse_model_name(&cfg.embedding.model)?;
 
@@ -68,9 +109,13 @@ fn init_model() -> Result<ModelState, String> {
         .with_show_download_progress(true)
         .with_max_length(max_length);
 
-    // Wire CoreML execution provider when backend = "coreml"
+    #[cfg(target_os = "macos")]
     if backend == "coreml" {
         opts = opts.with_execution_providers(coreml_providers());
+    }
+    #[cfg(not(target_os = "macos"))]
+    if backend == "cuda" {
+        opts = opts.with_execution_providers(cuda_providers());
     }
 
     let model = TextEmbedding::try_new(opts).map_err(|e| {

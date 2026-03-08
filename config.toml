@@ -4,24 +4,26 @@ concurrency = 36
 rate_limit_ms = 350
 
 [embedding]
-backend = "fastembed"       # Pure CPU — faster than CoreML for this small model (partial graph fallback hurts)
-model = "all-minilm-l6-v2"  # fp32 (unquantized) - M2 NEON SIMD handles this natively, often faster than int8
+backend = "auto"            # Auto-detect: CoreML on macOS, CUDA on Windows/Linux w/ NVIDIA, CPU otherwise
+model = "bge-small-en-v1.5"
 dim = 384
-batch_size = 32             # Match inner ONNX batch size — avoids overhead of multiple serial inner calls
-max_length = 128
-bulk_workers = 1            # Parallel ORT sessions for embed binary (2 sessions × 4 threads on M2)
-bulk_intra_threads = 8      # Intra-op threads per bulk session
+batch_size = 32
+max_length = 512
+bulk_workers = 1
+bulk_intra_threads = 8
 
 [hnsw]
-backend = "hnsw"           # "hnsw" | "bruteforce"
+backend = "hnsw"
 shards = 1
 m = 16
 ef_construction = 200
-ef_search = 80
-max_elements = 2_000_000
+ef_search = 200
+max_elements = 4_000_000
 
 [chunking]
-context_depth = 3          # how many heading levels to prepend
+context_depth = 3
+window_size = 3
+window_overlap = 1
 
 [rocksdb]
 block_cache_mb = 256

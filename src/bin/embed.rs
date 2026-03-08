@@ -140,6 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_length = cfg.embedding.max_length.unwrap_or(256);
     let workers = bulk::create_workers(
         &cfg.embedding.model,
+        &cfg.embedding.backend,
         max_length,
         cfg.embedding.dim,
         cfg.embedding.bulk_workers,
@@ -266,7 +267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 ids.push(key.to_vec());
-                texts.push(chunk.text);
+                texts.push(chunk.embed_text.unwrap_or(chunk.text));
 
                 if texts.len() >= batch_size {
                     if work_tx

@@ -23,7 +23,6 @@ toml = "1.0.3"
 rayon = "1.11"
 tantivy = "0.25"
 fastembed = "=4.9.1"
-ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "coreml"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 ndarray = "0.16"
 bytemuck = "1.18"
@@ -36,6 +35,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5.8"
 rlimit = "0.11.0"
 ureq = "3.2.0"
+
+# macOS: CoreML (Apple Neural Engine / GPU)
+[target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "coreml"] }
+
+# Windows / Linux: CUDA (NVIDIA GPU, graceful fallback to CPU if no CUDA runtime)
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "cuda"] }
 
 [profile.dev]
 opt-level = 1              # avoids OOM on large ML workloads in debug mode

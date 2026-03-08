@@ -371,22 +371,33 @@ fn store_page_and_chunks(
     let mut chunk_count = 0usize;
     let mut preceding_sentences: Vec<String> = Vec::new();
 
+    let window_size = cfg.chunking.window_size;
+    let window_overlap = cfg.chunking.window_overlap;
+
     for block in &page.blocks {
         if chunk_count >= MAX_CHUNKS_PER_PAGE {
             break;
         }
 
         let sentences = sentencizer::split_sentences(&block.text);
-        for sentence in sentences {
+        let windows = sentencizer::merge_windows(&sentences, window_size, window_overlap);
+
+        for window_text in windows {
             if chunk_count >= MAX_CHUNKS_PER_PAGE {
                 break;
             }
 
-            let (chained_sentence, is_leaf) =
-                chaining::apply_statement_chaining(&sentence, &preceding_sentences);
-            let final_text = context::with_context_depth(
+            let (chained_text, is_leaf) =
+                chaining::apply_statement_chaining(&window_text, &preceding_sentences);
+            let display_text = context::with_context_depth(
                 &block.heading_chain,
-                &chained_sentence,
+                &chained_text,
+                cfg.chunking.context_depth,
+            );
+            let embed_text = context::with_embed_context(
+                Some(&page.title),
+                &block.heading_chain,
+                &chained_text,
                 cfg.chunking.context_depth,
             );
             let chunk_id = make_chunk_id(&page.url, chunk_count);
@@ -395,12 +406,14 @@ fn store_page_and_chunks(
                 id: chunk_id.clone(),
                 source_url: page.url.clone(),
                 heading_chain: block.heading_chain.clone(),
-                text: final_text,
+                text: display_text,
+                embed_text: Some(embed_text),
+                page_title: Some(page.title.clone()),
                 is_leaf,
             };
 
             wb.put_cf(chunks_cf, chunk_id.as_bytes(), serde_json::to_vec(&chunk)?);
-            preceding_sentences.push(sentence);
+            preceding_sentences.push(window_text);
             if preceding_sentences.len() > 4 {
                 preceding_sentences.remove(0);
             }

@@ -41,6 +41,12 @@ pub struct Chunk {
     /// Full heading chain prepended before embedding
     pub heading_chain: Vec<String>,
     pub text: String,
+    /// Text used for embedding (includes page title + heading context). Falls back to `text`.
+    #[serde(default)]
+    pub embed_text: Option<String>,
+    /// Page title from the source document
+    #[serde(default)]
+    pub page_title: Option<String>,
     /// False for sentences that are pure antecedents (statement chaining)
     pub is_leaf: bool,
 }

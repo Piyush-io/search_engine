@@ -41,6 +41,13 @@ fn default_bulk_intra_threads() -> usize {
     4
 }
 
+fn default_window_size() -> usize {
+    3
+}
+fn default_window_overlap() -> usize {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HnswConfig {
     pub backend: String,
@@ -54,6 +61,10 @@ pub struct HnswConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChunkingConfig {
     pub context_depth: usize,
+    #[serde(default = "default_window_size")]
+    pub window_size: usize,
+    #[serde(default = "default_window_overlap")]
+    pub window_overlap: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

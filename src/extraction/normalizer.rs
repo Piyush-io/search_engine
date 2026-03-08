@@ -129,7 +129,7 @@ pub fn normalize(html: &str, url: &str) -> PageRecord {
     let parsed = Html::parse_document(&cleaned);
     let root = select_content_root(&parsed).unwrap_or_else(|| parsed.root_element());
 
-    let all_sel = Selector::parse("h1,h2,h3,h4,h5,h6,p,li,dd,dt,pre,code,td,th,tr").unwrap();
+    let all_sel = Selector::parse("h1,h2,h3,h4,h5,h6,p,li,dd,dt,pre,code,tr").unwrap();
     let anchor_sel = Selector::parse("a").unwrap();
 
     let mut headings: Vec<Option<String>> = vec![None; 6];

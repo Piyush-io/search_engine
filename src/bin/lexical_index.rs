@@ -1,5 +1,5 @@
 use rocksdb::IteratorMode;
-use search_engine::{Chunk, config, search::lexical::LexicalIndex, storage};
+use search_engine::{config, search::lexical::LexicalIndex, storage, Chunk};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load()?;
@@ -7,7 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let chunks_cf = storage::cf(&db, storage::CF_CHUNKS)?;
 
     let lexical = LexicalIndex::create_or_open(&cfg.paths.lexical_index_path)?;
-    let (chunk_id_field, text_field, heading_field, source_url_field) = lexical.fields();
+    let (chunk_id_field, title_field, section_field, text_field, heading_field, source_url_field) =
+        lexical.fields();
     let mut writer = lexical.writer(512 * 1024 * 1024)?;
 
     writer.delete_all_documents()?;
@@ -19,6 +20,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut doc = tantivy::doc!();
         doc.add_text(chunk_id_field, &chunk.id);
+        if let Some(title_field) = title_field {
+            if let Some(title) = chunk.heading_chain.first() {
+                doc.add_text(title_field, title);
+            }
+        }
+        if let Some(section_field) = section_field {
+            if let Some(section) = chunk.heading_chain.last() {
+                doc.add_text(section_field, section);
+            }
+        }
         doc.add_text(text_field, &chunk.text);
         doc.add_text(heading_field, &chunk.heading_chain.join(" "));
         doc.add_text(source_url_field, &chunk.source_url);

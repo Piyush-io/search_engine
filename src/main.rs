@@ -46,6 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(storage::open_db(&cfg.paths.db_path)?);
 
     let index_backend = cfg.hnsw.backend.to_ascii_lowercase();
+    println!("[server] loading vector index from {} (this may take a minute)...", cfg.paths.index_path);
+    let t0 = std::time::Instant::now();
     let index: Arc<dyn VectorIndex> = if index_backend == "bruteforce" {
         let idx = match BruteForceIndex::load_from_path(&cfg.paths.index_path) {
             Ok(idx) => idx,
@@ -67,10 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!(
-        "[server] vector backend={} entries={}",
+        "[server] vector backend={} entries={} loaded in {:.1}s",
         index_backend,
-        index.len()
-    );
+        index.len(),
+        t0.elapsed().as_secs_f64(),    );
 
     let lexical = LexicalIndex::open(&cfg.paths.lexical_index_path)
         .ok()
@@ -105,6 +107,8 @@ async fn search_handler(
         return Html(serp::render_home_page());
     }
 
+    let t0 = std::time::Instant::now();
+
     let results = query::run_query(
         &state.db,
         state.index.as_ref(),
@@ -113,10 +117,14 @@ async fn search_handler(
         10,
     );
     let panel = panel::build_panel(&state.db, &query_text);
+
+    let elapsed_ms = t0.elapsed().as_millis();
+
     Html(serp::render_results_page(
         &query_text,
         &results,
         panel.as_ref(),
+        elapsed_ms,
     ))
 }
 

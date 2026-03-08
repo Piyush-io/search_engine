@@ -1,5 +1,8 @@
 use std::fs;
+use std::path::Path;
 
+use hnsw_rs::api::AnnT;
+use hnsw_rs::hnswio::*;
 use hnsw_rs::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +33,7 @@ pub struct HnswIndex {
     max_elements: usize,
     hnsw: Hnsw<'static, f32, DistCosine>,
     entries: Vec<Entry>,
+    _io: Option<HnswIo>,
 }
 
 impl HnswIndex {
@@ -53,6 +57,7 @@ impl HnswIndex {
             max_elements,
             hnsw,
             entries: Vec::new(),
+            _io: None,
         }
     }
 
@@ -71,7 +76,10 @@ impl HnswIndex {
 
         let idx = self.entries.len();
         self.hnsw.insert((vector.as_slice(), idx));
-        self.entries.push(Entry { chunk_id, vector });
+        self.entries.push(Entry {
+            chunk_id,
+            vector: Vec::new(),
+        });
     }
 
     pub fn search(&self, query: &EmbeddingVec, k: usize) -> Vec<(ChunkId, f32)> {
@@ -95,6 +103,13 @@ impl HnswIndex {
     }
 
     pub fn save_to_path(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let p = Path::new(path);
+        let parent = p.parent().unwrap_or(Path::new("."));
+        let basename = p.file_name().unwrap_or_default().to_string_lossy();
+
+        // Dump graph and data via hnswio
+        self.hnsw.file_dump(parent, &basename)?;
+
         let persisted = PersistedIndex {
             dim: self.dim,
             m: self.m,
@@ -104,6 +119,7 @@ impl HnswIndex {
             entries: self.entries.clone(),
         };
 
+        // Dump metadata
         let bytes = bincode::serialize(&persisted)?;
         fs::write(path, bytes)?;
         Ok(())
@@ -113,6 +129,11 @@ impl HnswIndex {
         let bytes = fs::read(path)?;
         let persisted: PersistedIndex = bincode::deserialize(&bytes)?;
 
+        let p = Path::new(path);
+        let parent = p.parent().unwrap_or(Path::new("."));
+        let basename = p.file_name().unwrap_or_default().to_string_lossy();
+        let graph_path = parent.join(format!("{}.hnsw.graph", basename));
+
         let mut idx = Self::with_params(
             persisted.dim,
             persisted.m,
@@ -121,8 +142,31 @@ impl HnswIndex {
             persisted.max_elements.max(persisted.entries.len()),
         );
 
-        for e in persisted.entries {
-            idx.insert(e.chunk_id, e.vector);
+        if graph_path.exists() {
+            tracing::info!("Found HNSW graph dump, loading instantly...");
+            let io = Box::leak(Box::new(HnswIo::new(parent, &basename)));
+            idx.hnsw = io.load_hnsw()?;
+            idx.entries = persisted.entries;
+            // Clear vectors from memory to save RAM, since they are inside the memory mapped graph
+            for e in &mut idx.entries {
+                e.vector.clear();
+                e.vector.shrink_to_fit();
+            }
+        } else {
+            tracing::info!("No HNSW graph dump found, rebuilding from entries...");
+            for mut e in persisted.entries {
+                let vec = std::mem::take(&mut e.vector);
+                idx.insert(e.chunk_id.clone(), vec);
+            }
+
+            // Clear vectors from memory after insert
+            for e in &mut idx.entries {
+                e.vector.clear();
+                e.vector.shrink_to_fit();
+            }
+
+            tracing::info!("Rebuild complete, saving fast dump...");
+            let _ = idx.save_to_path(path);
         }
 
         Ok(idx)
@@ -136,7 +180,8 @@ fn make_hnsw(
 ) -> Hnsw<'static, f32, DistCosine> {
     let max_nb_connection = m.max(4);
     let nb_elem = max_elements.max(1);
-    let nb_layer = 16.min((nb_elem as f32).ln().trunc().max(1.0) as usize);
+    // hnsw_rs requires nb_layer = 16 to dump successfully
+    let nb_layer = 16;
 
     Hnsw::<f32, DistCosine>::new(
         max_nb_connection,
