@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::{knowledge::wikipedia::WikiRecord, web::tracking, SearchResult};
+use crate::{SearchResult, knowledge::wikipedia::WikiRecord, web::tracking};
 
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")

@@ -82,6 +82,21 @@ impl HnswIndex {
         });
     }
 
+    /// Parallel bulk insert using Rayon — call `push_chunk_id` for each entry afterward.
+    /// `data` is `&[(&Vec<f32>, usize)]` where the usize is the numeric index (0-based, contiguous).
+    pub fn parallel_insert_slice(&mut self, data: &[(&Vec<f32>, usize)]) {
+        self.hnsw.parallel_insert(data);
+    }
+
+    /// Register a chunk_id for a numeric index produced by `parallel_insert_slice`.
+    /// Must be called in the same order as the indices passed to `parallel_insert_slice`.
+    pub fn push_chunk_id(&mut self, chunk_id: ChunkId) {
+        self.entries.push(Entry {
+            chunk_id,
+            vector: Vec::new(),
+        });
+    }
+
     pub fn search(&self, query: &EmbeddingVec, k: usize) -> Vec<(ChunkId, f32)> {
         if k == 0 || self.entries.is_empty() || query.len() != self.dim {
             return Vec::new();

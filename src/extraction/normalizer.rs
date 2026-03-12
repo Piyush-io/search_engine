@@ -2,7 +2,10 @@ use crate::{PageRecord, TextBlock};
 use kuchiki::traits::TendrilSink;
 use scraper::{ElementRef, Html, Selector};
 
-use super::{density, metadata};
+use super::{
+    density,
+    metadata::{self, PageMeta},
+};
 
 fn extract_text(el: &ElementRef<'_>) -> String {
     el.text()
@@ -110,6 +113,13 @@ fn denormalize_table_row(row: &ElementRef<'_>) -> Option<String> {
 
 /// Parse raw HTML into a `PageRecord` with heading-aware text blocks.
 pub fn normalize(html: &str, url: &str) -> PageRecord {
+    let (page, _, _) = normalize_with_cleaned(html, url);
+    page
+}
+
+/// Like `normalize`, but also returns the boilerplate-stripped HTML string so
+/// callers (e.g. link extraction) can reuse it instead of re-parsing.
+pub fn normalize_with_cleaned(html: &str, url: &str) -> (PageRecord, String, PageMeta) {
     // 1) Parse + strip boilerplate tags.
     let doc = kuchiki::parse_html().one(html);
     if let Ok(nodes) = doc.select("script, style, nav, header, footer") {
@@ -201,10 +211,17 @@ pub fn normalize(html: &str, url: &str) -> PageRecord {
         });
     }
 
-    PageRecord {
-        url: url.to_string(),
-        title: meta.title.unwrap_or_else(|| url.to_string()),
-        description: meta.description,
-        blocks,
-    }
+    let title = meta.title.clone().unwrap_or_else(|| url.to_string());
+    let description = meta.description.clone();
+
+    (
+        PageRecord {
+            url: url.to_string(),
+            title,
+            description,
+            blocks,
+        },
+        cleaned,
+        meta,
+    )
 }

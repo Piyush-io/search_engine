@@ -1,3 +1,10 @@
 pub mod canon;
 pub mod dns;
 pub mod robots;
+pub mod types;
+pub mod policy;
+pub mod scheduler;
+pub mod fetch;
+pub mod parse;
+pub mod persist;
+pub mod recover;

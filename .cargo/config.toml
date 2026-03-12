@@ -1,13 +1,13 @@
 [build]
 rustflags = [
     "-C", "target-cpu=native",
-    # Link clang compiler-rt so ort-sys CoreML code can find ___isPlatformVersionAtLeast
-    "-C", "link-arg=-L/Library/Developer/CommandLineTools/usr/lib/clang/17/lib/darwin",
-    "-C", "link-arg=-lclang_rt.osx",
 ]
 
 [env]
-MACOSX_DEPLOYMENT_TARGET = "14.0"
+# CUDA libraries path
+LD_LIBRARY_PATH = "/usr/local/cuda-12.6/targets/x86_64-linux/lib:/home/hail/.local/lib/cudnn:/home/hail/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6A14FDE80317F61BCACC6E06FBBF7F609BAEF7FC82BED979D8FE1C4012012247/onnxruntime/lib"
+# ONNX Runtime shared library (downloaded by the ort crate at build time)
+ORT_DYLIB_PATH = "/home/hail/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6A14FDE80317F61BCACC6E06FBBF7F609BAEF7FC82BED979D8FE1C4012012247/onnxruntime/lib/libonnxruntime.so"
 
 [alias]
 run-opt = "run --release"

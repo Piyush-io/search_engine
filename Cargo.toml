@@ -28,6 +28,7 @@ ndarray = "0.16"
 bytemuck = "1.18"
 aes-gcm = "0.10"
 rand = "0.8"
+dashmap = "6"
 hnsw_rs = "0.3.3"
 
 tracing = "0.1"
@@ -35,12 +36,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2.5.8"
 rlimit = "0.11.0"
 ureq = "3.2.0"
+regex = "1"
+urlencoding = "2"
 
 # macOS: CoreML (Apple Neural Engine / GPU)
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "coreml"] }
 
-# Windows / Linux: CUDA (NVIDIA GPU, graceful fallback to CPU if no CUDA runtime)
+# Windows / Linux: CUDA (NVIDIA GPU)
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "cuda"] }
 

@@ -1,24 +1,23 @@
-use rocksdb::IteratorMode;
+use rocksdb::ReadOptions;
 use search_engine::{
     config,
     search::{bruteforce::BruteForceIndex, hnsw::HnswIndex},
     storage,
 };
 
+const READAHEAD_BYTES: usize = 8 * 1024 * 1024;
+
 fn decode_vector(value: &[u8], dim: usize) -> Option<Vec<f32>> {
-    // Fast path: raw little-endian f32 bytes written by embed.rs
+    // Fast path: raw little-endian f32 bytes written by embed.rs.
+    // RocksDB does NOT guarantee pointer alignment, so we copy into an aligned
+    // Vec<f32> instead of casting the slice pointer directly (which bytemuck
+    // rejects with TargetAlignmentGreaterAndInputNotAligned when unaligned).
     if value.len() == dim * std::mem::size_of::<f32>() {
-        let mut out = vec![0.0_f32; dim];
-        for (i, slot) in out.iter_mut().enumerate() {
-            let start = i * 4;
-            let bytes = [
-                value[start],
-                value[start + 1],
-                value[start + 2],
-                value[start + 3],
-            ];
-            *slot = f32::from_le_bytes(bytes);
-        }
+        let mut out = vec![0f32; dim];
+        // SAFETY: out is a &mut [f32] which has the required alignment; we copy
+        // raw bytes from value into it using the safe bytemuck cast on the dst.
+        let dst: &mut [u8] = bytemuck::cast_slice_mut(&mut out);
+        dst.copy_from_slice(value);
         return Some(out);
     }
 
@@ -38,27 +37,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let embeddings_cf = storage::cf(&db, storage::CF_EMBEDDINGS)?;
 
+    // Use readahead for sequential bulk scan — avoids block cache pollution
+    let mut read_opts = ReadOptions::default();
+    read_opts.fill_cache(false);
+    read_opts.set_readahead_size(READAHEAD_BYTES);
+    read_opts.set_auto_readahead_size(true);
+
     let backend = cfg.hnsw.backend.to_ascii_lowercase();
     if backend == "bruteforce" {
         let mut index = BruteForceIndex::new(cfg.embedding.dim);
         let mut inserted = 0usize;
         let mut skipped = 0usize;
 
-        for item in db.iterator_cf(embeddings_cf, IteratorMode::Start) {
-            let (key, value) = item?;
+        let mut iter = db.raw_iterator_cf_opt(&embeddings_cf, read_opts);
+        iter.seek_to_first();
+        while iter.valid() {
+            let (key, value) = match (iter.key(), iter.value()) {
+                (Some(k), Some(v)) => (k, v),
+                _ => break,
+            };
             let chunk_id = String::from_utf8(key.to_vec())?;
 
-            let Some(vector) = decode_vector(value.as_ref(), cfg.embedding.dim) else {
-                skipped += 1;
-                continue;
-            };
-
-            index.insert(chunk_id, vector);
-            inserted += 1;
-
-            if inserted % 5_000 == 0 {
-                println!("[index] inserted={} entries (bruteforce)", inserted);
+            match decode_vector(value, cfg.embedding.dim) {
+                Some(vector) => {
+                    index.insert(chunk_id, vector);
+                    inserted += 1;
+                    if inserted % 5_000 == 0 {
+                        println!("[index] inserted={} entries (bruteforce)", inserted);
+                    }
+                }
+                None => skipped += 1,
             }
+            iter.next();
         }
 
         if inserted == 0 && skipped > 0 {
@@ -87,32 +97,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.hnsw.ef_search,
         cfg.hnsw.max_elements,
     );
-    let mut inserted = 0usize;
     let mut skipped = 0usize;
 
-    for item in db.iterator_cf(embeddings_cf, IteratorMode::Start) {
-        let (key, value) = item?;
-        let chunk_id = String::from_utf8(key.to_vec())?;
+    // Collect all vectors first, then bulk-insert in parallel via hnsw_rs parallel_insert.
+    // This is 4–16× faster than one-at-a-time serial insert on a 6-core machine.
+    println!("[index] scanning embeddings into memory for parallel HNSW build…");
+    let mut entries: Vec<(String, Vec<f32>)> = Vec::new();
 
-        let Some(vector) = decode_vector(value.as_ref(), cfg.embedding.dim) else {
-            skipped += 1;
-            continue;
+    let mut iter = db.raw_iterator_cf_opt(&embeddings_cf, read_opts);
+    iter.seek_to_first();
+    while iter.valid() {
+        let (key, value) = match (iter.key(), iter.value()) {
+            (Some(k), Some(v)) => (k, v),
+            _ => break,
         };
-
-        index.insert(chunk_id, vector);
-        inserted += 1;
-
-        if inserted % 5_000 == 0 {
-            println!("[index] inserted={} entries (hnsw)", inserted);
+        let chunk_id = String::from_utf8(key.to_vec())?;
+        match decode_vector(value, cfg.embedding.dim) {
+            Some(vector) => entries.push((chunk_id, vector)),
+            None => skipped += 1,
         }
+        iter.next();
     }
 
-    if inserted == 0 && skipped > 0 {
+    let total = entries.len();
+    println!(
+        "[index] loaded {} vectors, skipped={} — starting parallel insert…",
+        total, skipped
+    );
+
+    if total == 0 && skipped > 0 {
         return Err(format!(
             "all embeddings were skipped due to dim mismatch (expected dim={}). Re-run embed after clearing old vectors.",
             cfg.embedding.dim
         )
         .into());
+    }
+
+    // parallel_insert takes &[(&[f32], usize)] — build the slice in chunks to avoid
+    // holding the full owned Vec while also building the borrow slice.
+    // hnsw_rs parallel_insert uses Rayon internally, saturating all cores.
+    const PARALLEL_CHUNK: usize = 50_000;
+    let mut inserted = 0usize;
+    for chunk in entries.chunks(PARALLEL_CHUNK) {
+        let data: Vec<(&Vec<f32>, usize)> = chunk
+            .iter()
+            .enumerate()
+            .map(|(i, (_, v))| (v, inserted + i))
+            .collect();
+        index.parallel_insert_slice(&data);
+        // Register chunk_ids for this batch (parallel_insert uses numeric ids)
+        for (_, (chunk_id, _)) in chunk.iter().enumerate() {
+            index.push_chunk_id(chunk_id.clone());
+        }
+        inserted += chunk.len();
+        println!("[index] inserted={}/{} (hnsw parallel)", inserted, total);
     }
 
     index.save_to_path(&cfg.paths.index_path)?;

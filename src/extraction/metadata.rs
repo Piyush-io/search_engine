@@ -7,6 +7,8 @@ pub struct PageMeta {
     pub og_title: Option<String>,
     pub og_description: Option<String>,
     pub og_image: Option<String>,
+    pub canonical_url: Option<String>,
+    pub noindex: bool,
 }
 
 impl Default for PageMeta {
@@ -17,8 +19,17 @@ impl Default for PageMeta {
             og_title: None,
             og_description: None,
             og_image: None,
+            canonical_url: None,
+            noindex: false,
         }
     }
+}
+
+fn robots_has_noindex(value: &str) -> bool {
+    value
+        .split(',')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .any(|part| part == "noindex" || part == "none")
 }
 
 /// Extract metadata from raw HTML head tags.
@@ -28,6 +39,7 @@ pub fn extract(html: &str) -> PageMeta {
 
     let title_sel = Selector::parse("title").unwrap();
     let meta_sel = Selector::parse("meta").unwrap();
+    let canonical_sel = Selector::parse("link[rel][href]").unwrap();
 
     if let Some(title) = doc.select(&title_sel).next() {
         let t = title.text().collect::<String>().trim().to_string();
@@ -54,6 +66,14 @@ pub fn extract(html: &str) -> PageMeta {
                 out.description = Some(value.clone());
             }
 
+            if matches!(
+                name.as_deref(),
+                Some("robots") | Some("googlebot") | Some("bingbot")
+            ) && robots_has_noindex(&value)
+            {
+                out.noindex = true;
+            }
+
             match property.as_deref() {
                 Some("og:title") if out.og_title.is_none() => out.og_title = Some(value),
                 Some("og:description") if out.og_description.is_none() => {
@@ -62,6 +82,28 @@ pub fn extract(html: &str) -> PageMeta {
                 Some("og:image") if out.og_image.is_none() => out.og_image = Some(value),
                 _ => {}
             }
+        }
+    }
+
+    for link in doc.select(&canonical_sel) {
+        let Some(rel) = link.value().attr("rel") else {
+            continue;
+        };
+        let is_canonical = rel
+            .split_ascii_whitespace()
+            .any(|token| token.eq_ignore_ascii_case("canonical"));
+        if !is_canonical {
+            continue;
+        }
+
+        if let Some(href) = link
+            .value()
+            .attr("href")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            out.canonical_url = Some(href.to_string());
+            break;
         }
     }
 

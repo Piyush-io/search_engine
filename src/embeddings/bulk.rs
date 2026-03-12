@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use fastembed::{EmbeddingModel, TextEmbedding, TokenizerFiles, read_file_to_bytes};
-use ndarray::{Array, Array2, s};
+use ndarray::{Array2, s};
 use ort::{
     session::{Session, builder::GraphOptimizationLevel},
     value::Value,
@@ -49,29 +49,29 @@ impl BulkWorker {
 
         let batch = texts.len();
         let seq_len = encodings[0].len();
-        let n = batch * seq_len;
 
-        let mut ids_flat = Vec::with_capacity(n);
-        let mut mask_flat = Vec::with_capacity(n);
-        let mut type_ids_flat = Vec::with_capacity(n);
+        let mut ids_arr = Array2::<i64>::zeros((batch, seq_len));
+        let mut mask_arr = Array2::<i64>::zeros((batch, seq_len));
+        let mut type_ids_arr = Array2::<i64>::zeros((batch, seq_len));
 
-        for enc in &encodings {
-            ids_flat.extend(enc.get_ids().iter().map(|&x| x as i64));
-            mask_flat.extend(enc.get_attention_mask().iter().map(|&x| x as i64));
-            type_ids_flat.extend(enc.get_type_ids().iter().map(|&x| x as i64));
+        for (i, enc) in encodings.iter().enumerate() {
+            let ids = enc.get_ids();
+            let mask = enc.get_attention_mask();
+            let tids = enc.get_type_ids();
+            for j in 0..seq_len {
+                ids_arr[[i, j]] = ids[j] as i64;
+                mask_arr[[i, j]] = mask[j] as i64;
+                type_ids_arr[[i, j]] = tids[j] as i64;
+            }
         }
 
-        let ids_arr = Array::from_shape_vec((batch, seq_len), ids_flat)?;
-        let mask_arr: Array2<i64> = Array::from_shape_vec((batch, seq_len), mask_flat.clone())?;
-        let type_ids_arr = Array::from_shape_vec((batch, seq_len), type_ids_flat)?;
-
         let mut session_inputs = ort::inputs![
-            "input_ids"      => ids_arr,
+            "input_ids"      => ids_arr.view(),
             "attention_mask" => mask_arr.view(),
         ]?;
 
         if self.needs_token_type_ids {
-            let type_val = Value::from_array(type_ids_arr)?.into_dyn();
+            let type_val = Value::from_array(type_ids_arr)?;
             session_inputs.push(("token_type_ids".into(), type_val.into()));
         }
 
@@ -81,24 +81,19 @@ impl BulkWorker {
         let token_embeddings = outputs[0].try_extract_tensor::<f32>()?;
         let view = token_embeddings.view();
 
-        let mask_arr2: Array2<i64> = Array::from_shape_vec(
-            (batch, seq_len),
-            mask_flat.iter().map(|&x| x as i64).collect(),
-        )?;
-        let pooled = mean_pool(&view, mask_arr2)?;
+        let pooled = mean_pool(&view, mask_arr)?;
 
         let mut result = Vec::with_capacity(batch);
         for row in pooled.rows() {
             let v: Vec<f32> = row.to_vec();
-            if v.len() != self.dim {
-                return Err(format!(
-                    "dim mismatch after pooling: expected {}, got {}",
-                    self.dim,
-                    v.len()
-                )
-                .into());
-            }
-            result.push(v);
+            // L2-normalize for consistent cosine similarity
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let normalized = if norm > 0.0 {
+                v.into_iter().map(|x| x / norm).collect()
+            } else {
+                v
+            };
+            result.push(normalized);
         }
         Ok(result)
     }
@@ -121,13 +116,10 @@ pub fn create_workers(
     let model_info =
         TextEmbedding::get_model_info(&parsed).map_err(|e| format!("model info: {e}"))?;
 
-    // Resolve model and tokenizer files from fastembed's cache directory.
-    // We scan the snapshots sub-directory rather than re-invoking hf-hub.
     let snapshot_dir = find_snapshot_dir(&model_info.model_code, &model_info.model_file)
         .ok_or_else(|| {
             format!(
-                "model not found in fastembed cache (run a normal embed first to download it). \
-                 Expected under: {}/models--{}/snapshots/",
+                "model not found in fastembed cache. Expected under: {}/models--{}/snapshots/",
                 fastembed::get_cache_dir(),
                 model_info.model_code.replace('/', "--"),
             )
@@ -181,21 +173,16 @@ fn parse_model_name(raw: &str) -> Result<EmbeddingModel, Box<dyn std::error::Err
     EmbeddingModel::from_str(raw).map_err(|_| format!("unknown model: {raw}").into())
 }
 
-/// Find the snapshot directory containing `model_file` under the fastembed cache.
 fn find_snapshot_dir(model_code: &str, model_file: &str) -> Option<PathBuf> {
     let cache_root = fastembed::get_cache_dir();
     let repo_folder = format!("models--{}", model_code.replace('/', "--"));
-    let snapshots_dir = Path::new(&cache_root).join(repo_folder).join("snapshots");
+    let snapshots_dir = Path::new(&cache_root).join(&repo_folder).join("snapshots");
 
-    // Alternatively the model may live in a flat layout directly under cache root
-    // (some older fastembed versions): check there first.
-    let flat_dir =
-        Path::new(&cache_root).join(format!("models--{}", model_code.replace('/', "--")));
+    let flat_dir = Path::new(&cache_root).join(&repo_folder);
     if flat_dir.join(model_file).exists() {
         return Some(flat_dir);
     }
 
-    // Normal HF-hub layout: models--org--name/snapshots/<hash>/...
     let Ok(entries) = std::fs::read_dir(&snapshots_dir) else {
         return None;
     };
@@ -224,9 +211,12 @@ fn build_session(
         .with_inter_threads(1)?;
 
     #[cfg(not(target_os = "macos"))]
-    if backend == "cuda" {
-        use ort::execution_providers::CUDAExecutionProvider;
-        builder = builder.with_execution_providers([CUDAExecutionProvider::default().build()])?;
+    {
+        let use_cuda = backend == "cuda" || backend == "auto";
+        if use_cuda {
+            use ort::execution_providers::CUDAExecutionProvider;
+            builder = builder.with_execution_providers([CUDAExecutionProvider::default().build()])?;
+        }
     }
 
     Ok(builder.commit_from_file(model_path)?)
@@ -239,7 +229,6 @@ fn build_tokenizer(
     use serde_json::Value as JsonValue;
 
     let config: JsonValue = serde_json::from_slice(&files.config_file)?;
-    let special_tokens_map: JsonValue = serde_json::from_slice(&files.special_tokens_map_file)?;
     let tokenizer_config: JsonValue = serde_json::from_slice(&files.tokenizer_config_file)?;
 
     let model_max = tokenizer_config["model_max_length"]
@@ -270,34 +259,6 @@ fn build_tokenizer(
         .map_err(|e| format!("tokenizer config: {e}"))?
         .clone();
 
-    let mut tokenizer = tokenizer;
-    if let JsonValue::Object(map) = special_tokens_map {
-        for (_, v) in &map {
-            if let Some(content) = v.as_str() {
-                tokenizer.add_special_tokens(&[AddedToken {
-                    content: content.into(),
-                    special: true,
-                    ..Default::default()
-                }]);
-            } else if let Some(content) = v.get("content").and_then(|c| c.as_str()) {
-                tokenizer.add_special_tokens(&[AddedToken {
-                    content: content.into(),
-                    special: true,
-                    single_word: v
-                        .get("single_word")
-                        .and_then(|x| x.as_bool())
-                        .unwrap_or(false),
-                    lstrip: v.get("lstrip").and_then(|x| x.as_bool()).unwrap_or(false),
-                    rstrip: v.get("rstrip").and_then(|x| x.as_bool()).unwrap_or(false),
-                    normalized: v
-                        .get("normalized")
-                        .and_then(|x| x.as_bool())
-                        .unwrap_or(true),
-                }]);
-            }
-        }
-    }
-
     Ok(tokenizer.into())
 }
 
@@ -305,13 +266,6 @@ fn mean_pool(
     token_embeddings: &ndarray::ArrayView<f32, ndarray::Dim<ndarray::IxDynImpl>>,
     attention_mask: Array2<i64>,
 ) -> Result<Array2<f32>, Box<dyn std::error::Error + Send + Sync>> {
-    if token_embeddings.ndim() == 2 {
-        let d = token_embeddings.dim();
-        return Ok(token_embeddings
-            .slice(s![.., ..])
-            .to_owned()
-            .into_shape_with_order((d[0], d[1]))?);
-    }
     if token_embeddings.ndim() != 3 {
         return Err(format!("unexpected ORT output ndim: {}", token_embeddings.ndim()).into());
     }

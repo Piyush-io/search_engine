@@ -1,9 +1,9 @@
 use std::{io, str::FromStr, sync::OnceLock};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use ort::execution_providers::ExecutionProviderDispatch;
 #[cfg(target_os = "macos")]
 use ort::execution_providers::CoreMLExecutionProvider;
+use ort::execution_providers::ExecutionProviderDispatch;
 
 use crate::{EmbeddingVec, config};
 
@@ -43,9 +43,7 @@ fn parse_model_name(raw: &str) -> Result<EmbeddingModel, String> {
 
 #[cfg(target_os = "macos")]
 fn coreml_providers() -> Vec<ExecutionProviderDispatch> {
-    vec![
-        CoreMLExecutionProvider::default().build(),
-    ]
+    vec![CoreMLExecutionProvider::default().build()]
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -57,7 +55,9 @@ fn cuda_providers() -> Vec<ExecutionProviderDispatch> {
 /// Auto-detect the best backend for the current platform.
 fn detect_backend() -> &'static str {
     #[cfg(target_os = "macos")]
-    { return "coreml"; }
+    {
+        return "coreml";
+    }
     #[cfg(not(target_os = "macos"))]
     {
         if std::env::var("CUDA_PATH").is_ok() || which_exists("nvidia-smi") {
@@ -153,6 +153,25 @@ pub fn backend_info() -> Result<String, Box<dyn std::error::Error>> {
     ))
 }
 
+fn format_query_for_model(model_name: &str, query: &str) -> String {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let lower = model_name.to_ascii_lowercase();
+    let needs_bge_instruction = lower.starts_with("bge-") || lower.contains("/bge-");
+
+    if needs_bge_instruction {
+        format!(
+            "Represent this sentence for searching relevant passages: {}",
+            trimmed
+        )
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Embed a single text. Fails fast if model is unavailable.
 pub fn embed(text: &str) -> Result<EmbeddingVec, Box<dyn std::error::Error>> {
     let s = state()?;
@@ -166,6 +185,16 @@ pub fn embed(text: &str) -> Result<EmbeddingVec, Box<dyn std::error::Error>> {
     };
 
     validate_and_normalize(v, s.dim)
+}
+
+/// Embed a search query, applying model-specific retrieval formatting when useful.
+pub fn embed_query(query: &str) -> Result<EmbeddingVec, Box<dyn std::error::Error>> {
+    let s = state()?;
+    let formatted = format_query_for_model(&s.model_name, query);
+    if formatted.is_empty() {
+        return Err(io::Error::other("query text is empty").into());
+    }
+    embed(&formatted)
 }
 
 pub fn embed_batch(texts: &[String]) -> Result<Vec<EmbeddingVec>, Box<dyn std::error::Error>> {
@@ -227,5 +256,11 @@ fn validate_and_normalize(
         .into());
     }
 
-    Ok(v)
+    // L2-normalize for consistent cosine similarity in HNSW index
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        Ok(v.into_iter().map(|x| x / norm).collect())
+    } else {
+        Ok(v)
+    }
 }

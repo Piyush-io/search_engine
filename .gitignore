@@ -5,3 +5,7 @@ hnsw_index.bin
 wiki_hnsw.bin
 crawl_data/
 agents.md
+*.log
+crawl_output.txt
+*.hnsw.data
+*.hnsw.graph

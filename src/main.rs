@@ -46,7 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Arc::new(storage::open_db(&cfg.paths.db_path)?);
 
     let index_backend = cfg.hnsw.backend.to_ascii_lowercase();
-    println!("[server] loading vector index from {} (this may take a minute)...", cfg.paths.index_path);
+    println!(
+        "[server] loading vector index from {} (this may take a minute)...",
+        cfg.paths.index_path
+    );
     let t0 = std::time::Instant::now();
     let index: Arc<dyn VectorIndex> = if index_backend == "bruteforce" {
         let idx = match BruteForceIndex::load_from_path(&cfg.paths.index_path) {
@@ -72,7 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "[server] vector backend={} entries={} loaded in {:.1}s",
         index_backend,
         index.len(),
-        t0.elapsed().as_secs_f64(),    );
+        t0.elapsed().as_secs_f64(),
+    );
 
     let lexical = LexicalIndex::open(&cfg.paths.lexical_index_path)
         .ok()

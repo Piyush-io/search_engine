@@ -41,7 +41,7 @@ fn state(db: &DB) -> Result<&'static WikiPanelState, Box<dyn std::error::Error>>
 
 /// ANN-backed wiki panel matcher.
 pub fn build_panel(db: &DB, query: &str) -> Option<WikiRecord> {
-    let query_vec = client::embed(query).ok()?;
+    let query_vec = client::embed_query(query).ok()?;
     let st = state(db).ok()?;
 
     let hits = st.index.search(&query_vec, 3);

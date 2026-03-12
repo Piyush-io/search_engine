@@ -4,9 +4,10 @@ use rocksdb::DB;
 use url::Url;
 
 use crate::{
+    Chunk, SearchResult,
     embeddings::client,
     search::{lexical::LexicalIndex, vector_index::VectorIndex},
-    storage, Chunk, SearchResult,
+    storage,
 };
 
 const SYNONYMS: &[(&[&str], &[&str])] = &[
@@ -55,7 +56,15 @@ fn build_expanded_query_text(original: &str, tokens: &HashSet<String>) -> String
     if new_terms.is_empty() {
         return original.to_string();
     }
-    format!("{} {}", original, new_terms.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "))
+    format!(
+        "{} {}",
+        original,
+        new_terms
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
 
 struct Candidate {
@@ -76,7 +85,7 @@ pub fn run_query(
     query_text: &str,
     k: usize,
 ) -> Vec<SearchResult> {
-    let query_vec = match client::embed(query_text) {
+    let query_vec = match client::embed_query(query_text) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[query] embedding failed: {e}");

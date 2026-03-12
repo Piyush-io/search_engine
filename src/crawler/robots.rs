@@ -1,38 +1,78 @@
-/// Fetch and parse robots.txt for `domain`, caching wildcard disallow rules in RocksDB.
-///
-/// CF expected: `robots` with key=domain and value=newline-joined disallow paths.
-pub async fn get_disallowed(
+use dashmap::DashMap;
+use std::sync::Arc;
+
+/// In-memory + RocksDB cache for robots.txt disallow rules.
+/// The DashMap avoids hitting RocksDB on every call for the same domain.
+pub type RobotsCache = Arc<DashMap<String, Vec<String>>>;
+
+pub fn new_cache() -> RobotsCache {
+    Arc::new(DashMap::new())
+}
+
+pub fn get_cached_disallowed(
     domain: &str,
     db: &rocksdb::DB,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    cache: &RobotsCache,
+) -> Result<Option<Vec<String>>, Box<dyn std::error::Error>> {
+    if let Some(entry) = cache.get(domain) {
+        return Ok(Some(entry.clone()));
+    }
+
     let robots_cf = db
         .cf_handle("robots")
         .ok_or("missing 'robots' column family")?;
 
-    if let Some(cached) = db.get_cf(robots_cf, domain.as_bytes())? {
-        let s = String::from_utf8(cached)?;
-        let rules = s
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
+    let Some(cached) = db.get_cf(robots_cf, domain.as_bytes())? else {
+        return Ok(None);
+    };
+
+    let s = String::from_utf8(cached)?;
+    let rules: Vec<String> = s
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    cache.insert(domain.to_string(), rules.clone());
+    Ok(Some(rules))
+}
+
+/// Fetch and parse robots.txt for `domain`, with a two-tier cache:
+/// 1. In-memory DashMap (fast path, no DB read)
+/// 2. RocksDB `robots` CF (persistent across runs)
+/// 3. HTTP fetch (only on cold miss)
+///
+/// Uses the caller-provided `client` for connection reuse and shared timeouts.
+pub async fn get_disallowed(
+    domain: &str,
+    db: &rocksdb::DB,
+    client: &reqwest::Client,
+    cache: &RobotsCache,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    // Fast path: in-memory cache.
+    if let Some(entry) = cache.get(domain) {
+        return Ok(entry.clone());
+    }
+
+    // Second tier: RocksDB persistent cache.
+    if let Some(rules) = get_cached_disallowed(domain, db, cache)? {
         return Ok(rules);
     }
 
+    let robots_cf = db
+        .cf_handle("robots")
+        .ok_or("missing 'robots' column family")?;
+
+    // Cold miss: fetch via shared client.
     let https_url = format!("https://{domain}/robots.txt");
     let http_url = format!("http://{domain}/robots.txt");
 
-    let txt = match reqwest::get(&https_url).await {
+    let txt = match client.get(&https_url).send().await {
         Ok(resp) if resp.status().is_success() => resp.text().await?,
-        _ => {
-            let fallback = reqwest::get(&http_url).await?;
-            if fallback.status().is_success() {
-                fallback.text().await?
-            } else {
-                String::new()
-            }
-        }
+        _ => match client.get(&http_url).send().await {
+            Ok(fallback) if fallback.status().is_success() => fallback.text().await?,
+            _ => String::new(),
+        },
     };
 
     let mut disallowed = Vec::new();
@@ -60,6 +100,7 @@ pub async fn get_disallowed(
         domain.as_bytes(),
         disallowed.join("\n").as_bytes(),
     )?;
+    cache.insert(domain.to_string(), disallowed.clone());
     Ok(disallowed)
 }
 

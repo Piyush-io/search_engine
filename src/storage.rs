@@ -1,4 +1,4 @@
-use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
+use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options};
 
 pub const CF_SEEN: &str = "seen";
 pub const CF_TO_CRAWL: &str = "to_crawl";
@@ -10,6 +10,7 @@ pub const CF_EMBEDDINGS: &str = "embeddings";
 pub const CF_CLICKS: &str = "clicks";
 pub const CF_WIKI: &str = "wiki";
 pub const CF_WIKI_EMBEDDINGS: &str = "wiki_embeddings";
+pub const CF_NORMALIZE_QUEUE: &str = "normalize_queue";
 
 pub fn all_cf_names() -> Vec<&'static str> {
     vec![
@@ -23,19 +24,28 @@ pub fn all_cf_names() -> Vec<&'static str> {
         CF_CLICKS,
         CF_WIKI,
         CF_WIKI_EMBEDDINGS,
+        CF_NORMALIZE_QUEUE,
     ]
 }
 
 /// Normal open: balanced read/write tuning, shared block cache.
 /// Use for the server and index binaries.
 pub fn open_db(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
-    open_db_internal(path, DbProfile::Normal)
+    open_db_internal(path, DbProfile::Normal, 256)
+}
+
+/// Normal open with a specific block-cache size (in MB).
+pub fn open_db_with_cache(
+    path: &str,
+    block_cache_mb: usize,
+) -> Result<DB, Box<dyn std::error::Error>> {
+    open_db_internal(path, DbProfile::Normal, block_cache_mb)
 }
 
 /// Bulk-write open: small write buffers, no block cache.
 /// Use for embed / wiki_embed to keep memory under control.
 pub fn open_db_for_bulk_write(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
-    open_db_internal(path, DbProfile::BulkWrite)
+    open_db_internal(path, DbProfile::BulkWrite, 0)
 }
 
 pub fn open_db_read_only(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
@@ -68,7 +78,11 @@ enum DbProfile {
     BulkWrite,
 }
 
-fn open_db_internal(path: &str, profile: DbProfile) -> Result<DB, Box<dyn std::error::Error>> {
+fn open_db_internal(
+    path: &str,
+    profile: DbProfile,
+    block_cache_mb: usize,
+) -> Result<DB, Box<dyn std::error::Error>> {
     let _ = rlimit::increase_nofile_limit(10240);
 
     let cpus = std::thread::available_parallelism()
@@ -97,7 +111,7 @@ fn open_db_internal(path: &str, profile: DbProfile) -> Result<DB, Box<dyn std::e
         }
     }
 
-    let cf_ops = cf_options(&profile);
+    let cf_ops = cf_options(&profile, block_cache_mb);
 
     let descriptors: Vec<ColumnFamilyDescriptor> = all_cf_names()
         .into_iter()
@@ -108,13 +122,14 @@ fn open_db_internal(path: &str, profile: DbProfile) -> Result<DB, Box<dyn std::e
     Ok(db)
 }
 
-fn cf_options(profile: &DbProfile) -> Options {
+fn cf_options(profile: &DbProfile, block_cache_mb: usize) -> Options {
     let mut opts = Options::default();
 
     match profile {
         DbProfile::Normal => {
-            // Shared block cache across all CFs — 128 MB total.
-            let cache = Cache::new_lru_cache(128 * 1024 * 1024);
+            // Shared block cache across all CFs — use configured size.
+            let cache_bytes = block_cache_mb.max(64) * 1024 * 1024;
+            let cache = Cache::new_lru_cache(cache_bytes);
             let mut bb_opts = BlockBasedOptions::default();
             bb_opts.set_block_cache(&cache);
             bb_opts.set_bloom_filter(10.0, false);

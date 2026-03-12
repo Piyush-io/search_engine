@@ -2,7 +2,15 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SIGNING_KEY: &str = "dev-only-click-signing-key";
+const TOKEN_MAX_AGE_MS: i64 = 3_600_000; // 1 hour
+
+fn signing_key() -> &'static str {
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        std::env::var("CLICK_SIGNING_KEY")
+            .unwrap_or_else(|_| "dev-only-click-signing-key".to_string())
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClickPayload {
@@ -40,15 +48,26 @@ pub fn decode_click_payload(token: &str) -> Option<ClickPayload> {
         return None;
     }
 
+    // Reject expired tokens
+    let age = now_ms() - signed.payload.timestamp_ms;
+    if age > TOKEN_MAX_AGE_MS || age < -60_000 {
+        return None;
+    }
+
     Some(signed.payload)
 }
 
+/// Keyed hash using length-prefixed construction to prevent extension attacks:
+/// SHA256(len(key) || key || canonical_data)
 fn sign_payload(payload: &ClickPayload) -> String {
+    let key = signing_key();
     let canonical = format!(
-        "{}|{}|{}|{}|{}",
-        payload.query, payload.position, payload.target_url, payload.timestamp_ms, SIGNING_KEY
+        "{}|{}|{}|{}",
+        payload.query, payload.position, payload.target_url, payload.timestamp_ms
     );
     let mut hasher = Sha256::new();
+    hasher.update((key.len() as u64).to_le_bytes());
+    hasher.update(key.as_bytes());
     hasher.update(canonical.as_bytes());
     format!("{:x}", hasher.finalize())
 }

@@ -314,7 +314,11 @@ mod tests {
     #[test]
     fn merge_windows_basic() {
         let s: Vec<String> = vec![
-            "A.".into(), "B.".into(), "C.".into(), "D.".into(), "E.".into(),
+            "A.".into(),
+            "B.".into(),
+            "C.".into(),
+            "D.".into(),
+            "E.".into(),
         ];
         let windows = merge_windows(&s, 3, 1);
         assert_eq!(windows.len(), 3);

@@ -1,10 +1,9 @@
-use std::collections::HashSet;
 use std::sync::mpsc;
 use std::time::Instant;
 
 use bytemuck::cast_slice;
 use rocksdb::{DBRawIteratorWithThreadMode, IteratorMode, ReadOptions, WriteBatch, WriteOptions};
-use search_engine::{config, embeddings::bulk, storage, Chunk};
+use search_engine::{Chunk, config, embeddings::bulk, storage};
 use tracing::{debug, info};
 
 const FLUSH_EVERY: usize = 20_000;
@@ -37,25 +36,6 @@ fn is_cf_empty(
     Ok(db.iterator_cf(cf, IteratorMode::Start).next().is_none())
 }
 
-fn load_embedded_keys(db: &rocksdb::DB) -> Result<HashSet<Vec<u8>>, Box<dyn std::error::Error>> {
-    let t0 = Instant::now();
-    let embeddings_cf = storage::cf(db, storage::CF_EMBEDDINGS)?;
-    let mut set = HashSet::new();
-    let mut iter = raw_iterator_for_scan(db, embeddings_cf);
-    iter.seek_to_first();
-    while iter.valid() {
-        let Some(key) = iter.key() else { break };
-        set.insert(key.to_vec());
-        iter.next();
-    }
-    info!(
-        keys = set.len(),
-        elapsed_ms = t0.elapsed().as_millis() as u64,
-        "loaded existing embedding keys"
-    );
-    Ok(set)
-}
-
 fn raw_iterator_for_scan<'a>(
     db: &'a rocksdb::DB,
     cf: rocksdb::ColumnFamilyRef<'a>,
@@ -68,6 +48,15 @@ fn raw_iterator_for_scan<'a>(
 }
 
 // ── pipeline types ────────────────────────────────────────────────────────────
+
+/// Whether we are in incremental mode (skip already-embedded keys).
+/// Instead of loading all keys into a HashSet (uses hundreds of MB),
+/// we rely on RocksDB's built-in Bloom filter via `key_may_exist_cf` +
+/// a cheap point-read only when the Bloom filter says "maybe".
+enum EmbedMode {
+    Fresh,       // no existing embeddings — skip all checks
+    Incremental, // use Bloom filter to skip already-embedded keys
+}
 
 struct WorkItem {
     ids: Vec<Vec<u8>>,
@@ -114,15 +103,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let embeddings_cf = storage::cf(&db, storage::CF_EMBEDDINGS)?;
 
-    let already_embedded: Option<HashSet<Vec<u8>>> = {
+    let embed_mode = {
         let empty = is_cf_empty(&db, embeddings_cf)?;
         if empty {
             info!("fast mode: no existing embeddings — will embed everything");
-            None
+            EmbedMode::Fresh
         } else {
-            info!("incremental mode: scanning existing embeddings…");
-            let keys = load_embedded_keys(&db)?;
-            Some(keys)
+            info!("incremental mode: using Bloom filter to skip already-embedded keys");
+            EmbedMode::Incremental
         }
     };
 
@@ -203,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batch_size = cfg.embedding.batch_size;
     let reader_handle = {
         let db_path = cfg.paths.db_path.clone();
-        let already_embedded = already_embedded.clone();
+        let is_incremental = matches!(embed_mode, EmbedMode::Incremental);
 
         std::thread::spawn(move || -> Result<(usize, usize, usize, usize), String> {
             // Scan through a separate read-only handle so the long-lived chunk
@@ -212,6 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 storage::open_db_read_only(&db_path).map_err(|e| format!("open reader db: {e}"))?;
             let chunks_cf = storage::cf(&reader_db, storage::CF_CHUNKS)
                 .map_err(|e| format!("chunks cf: {e}"))?;
+            let embeddings_cf_r = storage::cf(&reader_db, storage::CF_EMBEDDINGS)
+                .map_err(|e| format!("embeddings cf: {e}"))?;
 
             let mut ids: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
             let mut texts: Vec<String> = Vec::with_capacity(batch_size);
@@ -227,14 +217,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(value) = iter.value() else { break };
                 seen += 1;
 
-                if let Some(ref set) = already_embedded {
-                    if set.contains(key) {
-                        skipped_existing += 1;
-                        if skipped_existing % 50_000 == 0 {
-                            tracing::info!(scanned = seen, skipped_existing, "scanning…");
+                // Incremental mode: use RocksDB Bloom filter for a near-free existence check.
+                // key_may_exist_cf is O(1) and avoids loading all keys into RAM.
+                if is_incremental {
+                    let may_exist = reader_db.key_may_exist_cf(embeddings_cf_r, key);
+                    if may_exist {
+                        // Bloom filter says "maybe" — confirm with a point read.
+                        let exists = reader_db
+                            .get_cf(embeddings_cf_r, key)
+                            .map(|v| v.is_some())
+                            .unwrap_or(false);
+                        if exists {
+                            skipped_existing += 1;
+                            if skipped_existing % 50_000 == 0 {
+                                tracing::info!(scanned = seen, skipped_existing, "scanning…");
+                            }
+                            iter.next();
+                            continue;
                         }
-                        iter.next();
-                        continue;
                     }
                 }
 
@@ -272,15 +272,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if texts.len() >= batch_size {
                     if work_tx
                         .send(WorkItem {
-                            ids: ids.clone(),
-                            texts: texts.clone(),
+                            ids: std::mem::take(&mut ids),
+                            texts: std::mem::take(&mut texts),
                         })
                         .is_err()
                     {
                         break; // writer died, abort
                     }
-                    ids.clear();
-                    texts.clear();
                 }
 
                 iter.next();
