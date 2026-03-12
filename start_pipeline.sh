@@ -11,6 +11,17 @@ echo "=========================================================="
 echo "Building binaries..."
 cargo build --release --bin normalize_pages --bin embed --bin wiki_ingest --bin lexical_index --bin index --bin wiki_embed --bin wiki_index
 
+# --- FIX FOR ONNX RUNTIME SHARED LIBRARIES ---
+echo "Configuring library paths..."
+ONNX_DIR=$(find ./target/release -name "libonnxruntime.so" -exec dirname {} \; | head -n 1)
+if [ -n "$ONNX_DIR" ]; then
+    export LD_LIBRARY_PATH="$ONNX_DIR:$LD_LIBRARY_PATH"
+    echo "Set LD_LIBRARY_PATH to include $ONNX_DIR"
+else
+    echo "Warning: Could not find libonnxruntime.so in ./target/release"
+fi
+# ---------------------------------------------
+
 # Check for DB lock from a forgotten crawler
 if [ -f "./crawl_data/LOCK" ]; then
     echo "Check: Is the crawler or another process still running?"
