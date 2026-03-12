@@ -13,12 +13,15 @@ cargo build --release --bin normalize_pages --bin embed --bin wiki_ingest --bin 
 
 # --- FIX FOR ONNX RUNTIME SHARED LIBRARIES ---
 echo "Configuring library paths..."
-ONNX_DIR=$(find ./target/release -name "libonnxruntime.so" -exec dirname {} \; | head -n 1)
+# Search the entire project directory for the library
+ONNX_DIR=$(find . -name "libonnxruntime.so" -exec dirname {} \; | head -n 1)
 if [ -n "$ONNX_DIR" ]; then
-    export LD_LIBRARY_PATH="$ONNX_DIR:$LD_LIBRARY_PATH"
-    echo "Set LD_LIBRARY_PATH to include $ONNX_DIR"
+    # Convert to absolute path
+    FULL_ONNX_PATH=$(realpath "$ONNX_DIR")
+    export LD_LIBRARY_PATH="$FULL_ONNX_PATH:$LD_LIBRARY_PATH"
+    echo "Set LD_LIBRARY_PATH to $FULL_ONNX_PATH"
 else
-    echo "Warning: Could not find libonnxruntime.so in ./target/release"
+    echo "Warning: Could not find libonnxruntime.so anywhere in $(pwd)"
 fi
 # ---------------------------------------------
 
