@@ -10,16 +10,19 @@ image = (
         "libssl-dev", 
         "git", 
         "ca-certificates",
-        "clang",              # Required for bindgen (rocksdb)
-        "libclang-dev",       # Required for bindgen (rocksdb)
-        "cmake"               # Often helpful for C++ based crates
+        "clang", 
+        "libclang-dev", 
+        "cmake"
     )
     .run_commands(
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
-        "echo 'source $HOME/.cargo/env' >> $HOME/.bashrc"
     )
     .env({"PATH": "/root/.cargo/bin:$PATH"})
-    .run_commands("rustup default stable")
+    .run_commands(
+        "rustup default stable",
+        # Pre-clone the repo into the image so it's always there
+        "git clone https://github.com/Piyush-io/search_engine.git /search_engine"
+    )
 )
 
 app = modal.App("search-engine-indexer")
