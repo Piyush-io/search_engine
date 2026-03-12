@@ -73,6 +73,13 @@ struct DoneItem {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = rlimit::increase_nofile_limit(10240);
+    
+    if let Ok(ld_path) = std::env::var("LD_LIBRARY_PATH") {
+        println!("[diagnostic] LD_LIBRARY_PATH={}", ld_path);
+    } else {
+        println!("[diagnostic] LD_LIBRARY_PATH is NOT SET");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
