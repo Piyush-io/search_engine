@@ -50,18 +50,18 @@ impl BulkWorker {
         let batch = texts.len();
         let seq_len = encodings[0].len();
 
-        let mut ids_arr = Array2::<i64>::zeros((batch, seq_len));
-        let mut mask_arr = Array2::<i64>::zeros((batch, seq_len));
-        let mut type_ids_arr = Array2::<i64>::zeros((batch, seq_len));
+        let mut ids_arr = Array2::<i32>::zeros((batch, seq_len));
+        let mut mask_arr = Array2::<i32>::zeros((batch, seq_len));
+        let mut type_ids_arr = Array2::<i32>::zeros((batch, seq_len));
 
         for (i, enc) in encodings.iter().enumerate() {
             let ids = enc.get_ids();
             let mask = enc.get_attention_mask();
             let tids = enc.get_type_ids();
             for j in 0..seq_len {
-                ids_arr[[i, j]] = ids[j] as i64;
-                mask_arr[[i, j]] = mask[j] as i64;
-                type_ids_arr[[i, j]] = tids[j] as i64;
+                ids_arr[[i, j]] = ids[j] as i32;
+                mask_arr[[i, j]] = mask[j] as i32;
+                type_ids_arr[[i, j]] = tids[j] as i32;
             }
         }
 
@@ -81,7 +81,8 @@ impl BulkWorker {
         let token_embeddings = outputs[0].try_extract_tensor::<f32>()?;
         let view = token_embeddings.view();
 
-        let pooled = mean_pool(&view, mask_arr)?;
+        let mask_arr_i64 = mask_arr.mapv(|x| x as i64);
+        let pooled = mean_pool(&view, mask_arr_i64)?;
 
         let mut result = Vec::with_capacity(batch);
         for row in pooled.rows() {
