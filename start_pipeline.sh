@@ -12,16 +12,16 @@ echo "Building binaries..."
 cargo build --release --bin normalize_pages --bin embed --bin wiki_ingest --bin lexical_index --bin index --bin wiki_embed --bin wiki_index
 
 # --- FIX FOR ONNX RUNTIME SHARED LIBRARIES ---
+# ort crate downloads libonnxruntime.so into ~/.cache/ort.pyke.io/ during build.
+# The binary is dynamically linked, so we must add that cache dir to LD_LIBRARY_PATH.
 echo "Configuring library paths..."
-# Search the entire project directory for the library
-ONNX_DIR=$(find . -name "libonnxruntime.so" -exec dirname {} \; | head -n 1)
+ONNX_DIR=$(find "$HOME/.cache" /root/.cache /tmp . -name "libonnxruntime.so" -exec dirname {} \; 2>/dev/null | head -n 1)
 if [ -n "$ONNX_DIR" ]; then
-    # Convert to absolute path
     FULL_ONNX_PATH=$(realpath "$ONNX_DIR")
     export LD_LIBRARY_PATH="$FULL_ONNX_PATH:$LD_LIBRARY_PATH"
     echo "Set LD_LIBRARY_PATH to $FULL_ONNX_PATH"
 else
-    echo "Warning: Could not find libonnxruntime.so anywhere in $(pwd)"
+    echo "Warning: Could not find libonnxruntime.so — embed will fail"
 fi
 # ---------------------------------------------
 
