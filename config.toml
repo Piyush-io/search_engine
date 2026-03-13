@@ -7,10 +7,10 @@ rate_limit_ms = 100
 backend = "cuda"            # GTX 1660 SUPER — use CUDA EP directly
 model = "bge-small-en-v1.5"
 dim = 384
-batch_size = 256            # Safe default for 6GB VRAM
-max_length = 256
-bulk_workers = 1            # Single worker to avoid OOM
-bulk_intra_threads = 4      # Utilize more CPU for pre/post processing
+batch_size = 1024           # A10G 24GB VRAM handles large batches; safe on 1660S too (ORT auto-splits)
+max_length = 128            # chunks are ~60 tokens; halves inference time
+bulk_workers = 2            # 2 workers keep GPU saturated while one tokenizes
+bulk_intra_threads = 4      # CPU threads per worker for tokenization
 
 [hnsw]
 backend = "hnsw"
