@@ -2,7 +2,7 @@ import modal
 
 # CUDA base image so ort can use the A10G GPU
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.1.1-runtime-ubuntu22.04")
+    modal.Image.from_registry("nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04")
     .apt_install(
         "curl",
         "build-essential",
