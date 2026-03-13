@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options};
 
 pub const CF_SEEN: &str = "seen";
@@ -31,6 +33,7 @@ pub fn all_cf_names() -> Vec<&'static str> {
 /// Normal open: balanced read/write tuning, shared block cache.
 /// Use for the server and index binaries.
 pub fn open_db(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
+    validate_db_path(path)?;
     open_db_internal(path, DbProfile::Normal, 256)
 }
 
@@ -39,16 +42,19 @@ pub fn open_db_with_cache(
     path: &str,
     block_cache_mb: usize,
 ) -> Result<DB, Box<dyn std::error::Error>> {
+    validate_db_path(path)?;
     open_db_internal(path, DbProfile::Normal, block_cache_mb)
 }
 
 /// Bulk-write open: small write buffers, no block cache.
 /// Use for embed / wiki_embed to keep memory under control.
 pub fn open_db_for_bulk_write(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
+    validate_db_path(path)?;
     open_db_internal(path, DbProfile::BulkWrite, 0)
 }
 
 pub fn open_db_read_only(path: &str) -> Result<DB, Box<dyn std::error::Error>> {
+    validate_db_path(path)?;
     let _ = rlimit::increase_nofile_limit(10240);
 
     let mut db_options = Options::default();
@@ -72,6 +78,20 @@ pub fn cf<'a>(
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
+
+fn validate_db_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let db_path = Path::new(path);
+
+    if db_path.exists() && !db_path.is_dir() {
+        return Err(format!(
+            "RocksDB path '{}' exists but is not a directory. Move or rename that file and retry.",
+            path
+        )
+        .into());
+    }
+
+    Ok(())
+}
 
 enum DbProfile {
     Normal,
@@ -113,7 +133,22 @@ fn open_db_internal(
 
     let cf_ops = cf_options(&profile, block_cache_mb);
 
-    let descriptors: Vec<ColumnFamilyDescriptor> = all_cf_names()
+    let existing_cf_names = DB::list_cf(&db_opts, path).ok().filter(|v| !v.is_empty());
+
+    let cf_names: Vec<String> = match existing_cf_names {
+        Some(names) => {
+            let mut names = names;
+            for required in all_cf_names() {
+                if !names.iter().any(|name| name == required) {
+                    names.push(required.to_string());
+                }
+            }
+            names
+        }
+        None => all_cf_names().into_iter().map(|s| s.to_string()).collect(),
+    };
+
+    let descriptors: Vec<ColumnFamilyDescriptor> = cf_names
         .into_iter()
         .map(|name| ColumnFamilyDescriptor::new(name, cf_ops.clone()))
         .collect();

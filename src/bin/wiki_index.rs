@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rocksdb::IteratorMode;
 use search_engine::{config, search::hnsw::HnswIndex, storage};
 
@@ -55,6 +57,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if inserted % 5_000 == 0 {
             println!("[wiki_index] inserted={}", inserted);
         }
+    }
+
+    if inserted == 0 {
+        let index_path = Path::new(&cfg.paths.wiki_index_path);
+        let graph_path = index_path.with_file_name(format!(
+            "{}.hnsw.graph",
+            index_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        let data_path = index_path.with_file_name(format!(
+            "{}.hnsw.data",
+            index_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+
+        for stale_path in [index_path, graph_path.as_path(), data_path.as_path()] {
+            if stale_path.exists() {
+                std::fs::remove_file(stale_path)?;
+            }
+        }
+
+        println!(
+            "[wiki_index] no wiki embeddings found; removed stale artifacts for {}",
+            cfg.paths.wiki_index_path
+        );
+        return Ok(());
     }
 
     index.save_to_path(&cfg.paths.wiki_index_path)?;

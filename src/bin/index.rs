@@ -6,6 +6,7 @@ use search_engine::{
 };
 
 const READAHEAD_BYTES: usize = 8 * 1024 * 1024;
+const PARALLEL_CHUNK: usize = 50_000;
 
 fn decode_vector(value: &[u8], dim: usize) -> Option<Vec<f32>> {
     // Fast path: raw little-endian f32 bytes written by embed.rs.
@@ -29,6 +30,63 @@ fn decode_vector(value: &[u8], dim: usize) -> Option<Vec<f32>> {
     }
 
     None
+}
+
+fn remove_stale_hnsw_artifacts(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let graph_path = format!("{path}.hnsw.graph");
+    let data_path = format!("{path}.hnsw.data");
+
+    match std::fs::remove_file(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    match std::fs::remove_file(&graph_path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    match std::fs::remove_file(&data_path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(())
+}
+
+fn load_hnsw_batch(
+    iter: &mut rocksdb::DBRawIteratorWithThreadMode<'_, rocksdb::DB>,
+    dim: usize,
+    inserted: usize,
+    skipped: &mut usize,
+) -> Result<Vec<(String, Vec<f32>)>, Box<dyn std::error::Error>> {
+    let mut entries = Vec::with_capacity(PARALLEL_CHUNK);
+
+    while iter.valid() && entries.len() < PARALLEL_CHUNK {
+        let (key, value) = match (iter.key(), iter.value()) {
+            (Some(k), Some(v)) => (k, v),
+            _ => break,
+        };
+
+        let chunk_id = String::from_utf8(key.to_vec())?;
+        match decode_vector(value, dim) {
+            Some(vector) => entries.push((chunk_id, vector)),
+            None => *skipped += 1,
+        }
+
+        let scanned = inserted + entries.len() + *skipped;
+        if scanned % 250_000 == 0 {
+            println!(
+                "[index] scanned={} inserted_so_far={} skipped={}",
+                scanned, inserted, *skipped
+            );
+        }
+
+        iter.next();
+    }
+
+    Ok(entries)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -90,6 +148,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    println!("[index] streaming embeddings into bounded HNSW build batches…");
+
+    let mut iter = db.raw_iterator_cf_opt(&embeddings_cf, read_opts);
+    iter.seek_to_first();
+
     let mut index = HnswIndex::with_params(
         cfg.embedding.dim,
         cfg.hnsw.m,
@@ -97,35 +160,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg.hnsw.ef_search,
         cfg.hnsw.max_elements,
     );
+
+    let mut inserted = 0usize;
     let mut skipped = 0usize;
 
-    // Collect all vectors first, then bulk-insert in parallel via hnsw_rs parallel_insert.
-    // This is 4–16× faster than one-at-a-time serial insert on a 6-core machine.
-    println!("[index] scanning embeddings into memory for parallel HNSW build…");
-    let mut entries: Vec<(String, Vec<f32>)> = Vec::new();
-
-    let mut iter = db.raw_iterator_cf_opt(&embeddings_cf, read_opts);
-    iter.seek_to_first();
-    while iter.valid() {
-        let (key, value) = match (iter.key(), iter.value()) {
-            (Some(k), Some(v)) => (k, v),
-            _ => break,
-        };
-        let chunk_id = String::from_utf8(key.to_vec())?;
-        match decode_vector(value, cfg.embedding.dim) {
-            Some(vector) => entries.push((chunk_id, vector)),
-            None => skipped += 1,
+    loop {
+        let entries = load_hnsw_batch(&mut iter, cfg.embedding.dim, inserted, &mut skipped)?;
+        if entries.is_empty() {
+            break;
         }
-        iter.next();
+
+        if inserted == 0 {
+            println!(
+                "[index] initializing HNSW with first batch of {}",
+                entries.len()
+            );
+        }
+
+        let data: Vec<(&Vec<f32>, usize)> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (_, v))| (v, inserted + i))
+            .collect();
+
+        index.parallel_insert_slice(&data);
+        for (chunk_id, _) in &entries {
+            index.push_chunk_id(chunk_id.clone());
+        }
+
+        inserted += entries.len();
+
+        println!(
+            "[index] inserted batch_size={} cumulative_inserted={} skipped={}",
+            entries.len(),
+            inserted,
+            skipped
+        );
     }
 
-    let total = entries.len();
-    println!(
-        "[index] loaded {} vectors, skipped={} — starting parallel insert…",
-        total, skipped
-    );
-
-    if total == 0 && skipped > 0 {
+    if inserted == 0 && skipped > 0 {
         return Err(format!(
             "all embeddings were skipped due to dim mismatch (expected dim={}). Re-run embed after clearing old vectors.",
             cfg.embedding.dim
@@ -133,32 +206,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    // parallel_insert takes &[(&[f32], usize)] — build the slice in chunks to avoid
-    // holding the full owned Vec while also building the borrow slice.
-    // hnsw_rs parallel_insert uses Rayon internally, saturating all cores.
-    const PARALLEL_CHUNK: usize = 50_000;
-    let mut inserted = 0usize;
-    for chunk in entries.chunks(PARALLEL_CHUNK) {
-        let data: Vec<(&Vec<f32>, usize)> = chunk
-            .iter()
-            .enumerate()
-            .map(|(i, (_, v))| (v, inserted + i))
-            .collect();
-        index.parallel_insert_slice(&data);
-        // Register chunk_ids for this batch (parallel_insert uses numeric ids)
-        for (_, (chunk_id, _)) in chunk.iter().enumerate() {
-            index.push_chunk_id(chunk_id.clone());
-        }
-        inserted += chunk.len();
-        println!("[index] inserted={}/{} (hnsw parallel)", inserted, total);
+    if inserted == 0 {
+        remove_stale_hnsw_artifacts(&cfg.paths.index_path)?;
+        println!(
+            "[index] no embeddings found; removed stale HNSW artifacts at {}",
+            cfg.paths.index_path
+        );
+        return Ok(());
     }
 
     index.save_to_path(&cfg.paths.index_path)?;
     println!(
         "[index] done. backend=hnsw entries={} skipped={} saved_to={}",
-        index.len(),
-        skipped,
-        cfg.paths.index_path
+        inserted, skipped, cfg.paths.index_path
     );
 
     Ok(())
