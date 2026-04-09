@@ -16,7 +16,7 @@ use ort::{
     session::{Session, builder::GraphOptimizationLevel},
     value::Value,
 };
-use tokenizers::{AddedToken, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
+use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use crate::EmbeddingVec;
 
@@ -27,7 +27,6 @@ use crate::EmbeddingVec;
 pub struct BulkWorker {
     tokenizer: Tokenizer,
     session: Session,
-    dim: usize,
     needs_token_type_ids: bool,
 }
 
@@ -107,7 +106,7 @@ pub fn create_workers(
     model_name: &str,
     backend: &str,
     max_length: usize,
-    dim: usize,
+    _dim: usize,
     count: usize,
     intra_threads: usize,
 ) -> Result<Vec<BulkWorker>, Box<dyn std::error::Error>> {
@@ -142,7 +141,6 @@ pub fn create_workers(
         workers.push(BulkWorker {
             tokenizer,
             session,
-            dim,
             needs_token_type_ids,
         });
     }
@@ -215,7 +213,8 @@ fn build_session(
         let use_cuda = backend == "cuda" || backend == "auto";
         if use_cuda {
             use ort::execution_providers::CUDAExecutionProvider;
-            builder = builder.with_execution_providers([CUDAExecutionProvider::default().build()])?;
+            builder =
+                builder.with_execution_providers([CUDAExecutionProvider::default().build()])?;
         }
     }
 

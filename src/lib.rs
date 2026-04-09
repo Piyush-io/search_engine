@@ -4,6 +4,7 @@ pub mod crawler;
 pub mod embeddings;
 pub mod extraction;
 pub mod knowledge;
+pub mod pipeline;
 pub mod search;
 pub mod storage;
 pub mod web;

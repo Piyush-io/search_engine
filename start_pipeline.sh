@@ -45,13 +45,13 @@ echo "1. Normalizing Pages (HTML -> Chunks)..."
 ./target/release/normalize_pages
 
 echo "2. GPU Batch Embedding (Chunks -> Vectors)..."
-./target/release/embed
+./target/release/embed --full-scan
 
 echo "3. Building HNSW Vector Index..."
-./target/release/index
+./target/release/index --full
 
 echo "4. Building Lexical (BM25) Index..."
-./target/release/lexical_index
+./target/release/lexical_index --full
 
 if [ -f "training/wiki_summaries.jsonl" ]; then
     echo "5. Ingesting Wikipedia..."

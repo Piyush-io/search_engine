@@ -1,0 +1,40 @@
+[crawl]
+max_pages = 2_000_000
+concurrency = 200
+rate_limit_ms = 100
+
+[embedding]
+backend = "cuda"            # remote GPU profile
+model = "bge-small-en-v1.5"
+dim = 384
+batch_size = 256            # remote-friendly starting point; raise only after profiling
+max_length = 128
+bulk_workers = 1            # keep one GPU worker to control cost and VRAM
+bulk_intra_threads = 4
+
+[hnsw]
+backend = "hnsw"
+shards = 1
+m = 16
+ef_construction = 200
+ef_search = 200
+max_elements = 5_000_000
+
+[chunking]
+context_depth = 3
+window_size = 3
+window_overlap = 1
+
+[rocksdb]
+block_cache_mb = 256
+
+[server]
+port = 3000
+
+[paths]
+db_path = "/data/crawl_data"
+index_path = "/data/hnsw_index.bin"
+lexical_index_path = "/data/lexical_index"
+wiki_index_path = "/data/wiki_hnsw.bin"
+vector_delta_path = "/data/hnsw_delta.bin"
+seeds_path = "/workspace/seeds.md"

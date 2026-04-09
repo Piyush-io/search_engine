@@ -1,12 +1,12 @@
+use crate::crawler::policy;
+use crate::crawler::types::UrlTask;
 use std::{
-    collections::{HashMap, HashSet, VecDeque, BinaryHeap},
+    collections::{BinaryHeap, HashMap, HashSet, VecDeque},
     sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
-use crate::crawler::types::UrlTask;
-use crate::crawler::policy;
 
 #[derive(Default)]
 struct HostQueue {
@@ -196,7 +196,10 @@ impl CrawlScheduler {
         host_state.inflight = false;
         host_state.next_allowed_at = Some(
             Instant::now()
-                + Duration::from_millis(policy::domain_rate_limit_ms(self.default_rate_limit_ms, host)),
+                + Duration::from_millis(policy::domain_rate_limit_ms(
+                    self.default_rate_limit_ms,
+                    host,
+                )),
         );
         if !host_state.queued.is_empty() && !host_state.timer_armed {
             host_state.timer_armed = true;

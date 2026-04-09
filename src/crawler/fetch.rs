@@ -1,10 +1,8 @@
-use std::sync::Arc;
+use crate::crawler::types::{FetchResult, RejectReason, UrlTask};
+use crate::crawler::{canon, dns, policy, robots};
 use dashmap::DashMap;
 use reqwest::Client;
 use url::Url;
-use crate::crawler::types::{UrlTask, FetchResult, RejectReason};
-use crate::crawler::{dns, robots, canon, policy};
-use crate::storage;
 
 pub async fn fetch_task(
     db: &rocksdb::DB,

@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use crate::crawler::{persist, robots, scheduler::CrawlScheduler};
+use crate::storage;
 use dashmap::DashMap;
 use rocksdb::{DB, IteratorMode, WriteBatch};
-use crate::crawler::{robots, scheduler::CrawlScheduler, persist};
-use crate::storage;
+use std::collections::HashMap;
+use std::sync::Arc;
 use url::Url;
 
 pub async fn load_frontier_into_scheduler(
@@ -32,7 +32,12 @@ pub async fn load_frontier_into_scheduler(
         }
 
         if (loaded + purged) % 10_000 == 0 {
-            println!("[recover] processed {} frontier items (loaded={}, purged={})", loaded + purged, loaded, purged);
+            println!(
+                "[recover] processed {} frontier items (loaded={}, purged={})",
+                loaded + purged,
+                loaded,
+                purged
+            );
             if !delete_keys.is_empty() {
                 let mut wb = WriteBatch::default();
                 for key in delete_keys.drain(..) {
@@ -55,7 +60,7 @@ pub async fn load_frontier_into_scheduler(
 }
 
 pub async fn seed_frontier(
-    seeds: &[&str],
+    seeds: &[String],
     db: &DB,
     scheduler: &Arc<CrawlScheduler>,
     per_domain_processed: &DashMap<String, usize>,
@@ -66,7 +71,8 @@ pub async fn seed_frontier(
     let mut seeded = 0usize;
 
     for seed in seeds {
-        let Some(task) = persist::try_build_task(seed, db, per_domain_processed, robots_cache, 0)? else {
+        let Some(task) = persist::try_build_task(seed, db, per_domain_processed, robots_cache, 0)?
+        else {
             continue;
         };
 

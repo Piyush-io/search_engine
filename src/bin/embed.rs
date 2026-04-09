@@ -1,19 +1,23 @@
-use std::sync::mpsc;
-use std::time::Instant;
+use std::{sync::mpsc, time::Instant};
 
 use bytemuck::cast_slice;
 use rocksdb::{DBRawIteratorWithThreadMode, IteratorMode, ReadOptions, WriteBatch, WriteOptions};
-use search_engine::{Chunk, config, embeddings::bulk, storage};
+use search_engine::{
+    Chunk, config,
+    embeddings::{bulk, client},
+    pipeline::IndexOperation,
+    storage,
+};
 use tracing::{debug, info};
 
 const FLUSH_EVERY: usize = 20_000;
 const STREAM_READAHEAD_BYTES: usize = 8 * 1024 * 1024;
-/// Channel capacity in batches; keeps memory bounded while the pipeline stays full.
 const CHANNEL_DEPTH: usize = 8;
 
-// ── leaf detection ────────────────────────────────────────────────────────────
+fn has_flag(flag: &str) -> bool {
+    std::env::args().any(|arg| arg == flag)
+}
 
-/// Check `is_leaf` by scanning raw JSON bytes — avoids full deserialization.
 fn is_leaf_fast(value: &[u8]) -> bool {
     if let Some(pos) = value.windows(9).position(|w| w == b"\"is_leaf\"") {
         let rest = &value[pos + 9..];
@@ -47,15 +51,9 @@ fn raw_iterator_for_scan<'a>(
     db.raw_iterator_cf_opt(&cf, read_opts)
 }
 
-// ── pipeline types ────────────────────────────────────────────────────────────
-
-/// Whether we are in incremental mode (skip already-embedded keys).
-/// Instead of loading all keys into a HashSet (uses hundreds of MB),
-/// we rely on RocksDB's built-in Bloom filter via `key_may_exist_cf` +
-/// a cheap point-read only when the Bloom filter says "maybe".
 enum EmbedMode {
-    Fresh,       // no existing embeddings — skip all checks
-    Incremental, // use Bloom filter to skip already-embedded keys
+    Fresh,
+    Incremental,
 }
 
 struct WorkItem {
@@ -69,45 +67,125 @@ struct DoneItem {
     embed_dur: std::time::Duration,
 }
 
-// ── main ──────────────────────────────────────────────────────────────────────
+fn run_embed_queue(
+    cfg: &config::Config,
+    db: &rocksdb::DB,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let embed_queue_cf = storage::cf(db, storage::CF_EMBED_QUEUE)?;
+    let chunks_cf = storage::cf(db, storage::CF_CHUNKS)?;
+    let embeddings_cf = storage::cf(db, storage::CF_EMBEDDINGS)?;
+    let vector_queue_cf = storage::cf(db, storage::CF_VECTOR_QUEUE)?;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = rlimit::increase_nofile_limit(10240);
-    
-    if let Ok(ld_path) = std::env::var("LD_LIBRARY_PATH") {
-        println!("[diagnostic] LD_LIBRARY_PATH={}", ld_path);
-    } else {
-        println!("[diagnostic] LD_LIBRARY_PATH is NOT SET");
+    if db
+        .iterator_cf(embed_queue_cf, IteratorMode::Start)
+        .next()
+        .is_none()
+    {
+        info!("embed queue empty; nothing to do");
+        return Ok(());
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,ort=warn,ort_sys=warn")
-            }),
-        )
-        .with_target(false)
-        .with_timer(tracing_subscriber::fmt::time::uptime())
-        .init();
+    let mut write_opts = WriteOptions::default();
+    write_opts.disable_wal(true);
 
-    let t_start = Instant::now();
+    let batch_size = cfg.embedding.batch_size.max(1);
+    let mut embedded = 0usize;
+    let mut skipped_existing = 0usize;
+    let mut skipped_missing = 0usize;
+    let mut skipped_non_leaf = 0usize;
+    let mut skipped_malformed = 0usize;
+    let started = Instant::now();
 
-    let cfg = config::load()?;
+    loop {
+        let mut queue_batch = Vec::new();
+        for item in db
+            .iterator_cf(embed_queue_cf, IteratorMode::Start)
+            .take(batch_size)
+        {
+            let (key, _) = item?;
+            queue_batch.push(key.to_vec());
+        }
+
+        if queue_batch.is_empty() {
+            break;
+        }
+
+        let mut wb = WriteBatch::default();
+        let mut ids = Vec::new();
+        let mut texts = Vec::new();
+
+        for key in &queue_batch {
+            if db.get_cf(embeddings_cf, key)?.is_some() {
+                wb.put_cf(vector_queue_cf, key, IndexOperation::Upsert.as_bytes());
+                wb.delete_cf(embed_queue_cf, key);
+                skipped_existing += 1;
+                continue;
+            }
+
+            let Some(bytes) = db.get_cf(chunks_cf, key)? else {
+                wb.delete_cf(embed_queue_cf, key);
+                skipped_missing += 1;
+                continue;
+            };
+
+            let chunk: Chunk = match serde_json::from_slice(&bytes) {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    wb.delete_cf(embed_queue_cf, key);
+                    skipped_malformed += 1;
+                    continue;
+                }
+            };
+
+            if !chunk.is_leaf {
+                wb.delete_cf(embed_queue_cf, key);
+                skipped_non_leaf += 1;
+                continue;
+            }
+
+            ids.push(key.clone());
+            texts.push(chunk.embed_text.unwrap_or(chunk.text));
+        }
+
+        if !texts.is_empty() {
+            let vectors = client::embed_batch(&texts)?;
+            for (i, vector) in vectors.iter().enumerate() {
+                wb.put_cf(embeddings_cf, &ids[i], cast_slice(vector.as_slice()));
+                wb.put_cf(vector_queue_cf, &ids[i], IndexOperation::Upsert.as_bytes());
+                wb.delete_cf(embed_queue_cf, &ids[i]);
+            }
+            embedded += ids.len();
+        }
+
+        db.write_opt(wb, &write_opts)?;
+        if embedded > 0 && embedded % FLUSH_EVERY == 0 {
+            let _ = db.flush_cf(embeddings_cf);
+        }
+    }
+
+    let _ = db.flush_cf(embeddings_cf);
+    let elapsed = started.elapsed().as_secs_f64();
+    let rate = if elapsed > 0.0 {
+        embedded as f64 / elapsed
+    } else {
+        0.0
+    };
     info!(
-        backend     = %cfg.embedding.backend,
-        model       = %cfg.embedding.model,
-        dim         = cfg.embedding.dim,
-        batch_size  = cfg.embedding.batch_size,
-        max_length  = cfg.embedding.max_length.unwrap_or(256),
-        bulk_workers = cfg.embedding.bulk_workers,
-        bulk_intra_threads = cfg.embedding.bulk_intra_threads,
-        "embedding config"
+        embedded,
+        skipped_existing,
+        skipped_missing,
+        skipped_non_leaf,
+        skipped_malformed,
+        rate_per_sec = format_args!("{rate:.0}"),
+        "incremental embedding complete"
     );
+    Ok(())
+}
 
-    let t_db = Instant::now();
-    let db = std::sync::Arc::new(storage::open_db_for_bulk_write(&cfg.paths.db_path)?);
-    info!(elapsed_ms = t_db.elapsed().as_millis() as u64, "opened db");
-
+fn run_full_scan(
+    cfg: &config::Config,
+    db: std::sync::Arc<rocksdb::DB>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let embeddings_cf = storage::cf(&db, storage::CF_EMBEDDINGS)?;
 
     let embed_mode = {
@@ -121,17 +199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Warm fastembed cache (downloads model if missing) before workers start.
-    // The OnceLock singleton in client.rs does this, but we also need it for
-    // create_workers which reads files directly from the cache dir.
-    {
-        let t_warm = Instant::now();
-        info!("ensuring model cache is warm…");
-        let _ = search_engine::embeddings::client::configured_dim()?;
-        info!(ms = t_warm.elapsed().as_millis() as u64, "cache warm");
-    }
+    let t_warm = Instant::now();
+    info!("ensuring model cache is warm…");
+    let _ = search_engine::embeddings::client::configured_dim()?;
+    info!(ms = t_warm.elapsed().as_millis() as u64, "cache warm");
 
-    // Build workers — each gets its own ORT session with intra_threads threads.
     let max_length = cfg.embedding.max_length.unwrap_or(256);
     let workers = bulk::create_workers(
         &cfg.embedding.model,
@@ -143,16 +215,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     info!(workers = workers.len(), "workers created");
 
-    // ── pipeline channels ────────────────────────────────────────────────────
-    // reader  →  work_tx  →  worker threads
-    // worker threads  →  done_tx  →  writer (main thread continues after spawn)
     let (work_tx, work_rx) = mpsc::sync_channel::<WorkItem>(CHANNEL_DEPTH);
     let (done_tx, done_rx) = mpsc::sync_channel::<DoneItem>(CHANNEL_DEPTH);
 
-    // Spawn worker threads — one per BulkWorker.
-    // Workers pull WorkItems from a shared queue, embed, and push DoneItems.
-    // We use std::sync::Arc<Mutex<Receiver>> so all workers share the single
-    // work_rx without crossbeam (which is not in the direct dep list).
     use std::sync::{Arc, Mutex};
     let shared_rx = Arc::new(Mutex::new(work_rx));
 
@@ -167,20 +232,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     guard.recv()
                 };
                 match item {
-                    Err(_) => break, // channel closed — all work done
+                    Err(_) => break,
                     Ok(WorkItem { ids, texts }) => {
                         let t_embed = Instant::now();
                         match worker.embed_batch(&texts) {
-                            Err(e) => {
-                                // Log and skip bad batches rather than aborting.
-                                tracing::error!(error = %e, batch = texts.len(), "embed_batch failed");
+                            Err(err) => {
+                                tracing::error!(error = %err, batch = texts.len(), "embed_batch failed");
                             }
                             Ok(vectors) => {
-                                let embed_dur = t_embed.elapsed();
                                 let _ = tx.send(DoneItem {
                                     ids,
                                     vectors,
-                                    embed_dur,
+                                    embed_dur: t_embed.elapsed(),
                                 });
                             }
                         }
@@ -190,19 +253,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         handles.push(handle);
     }
-    // Drop the extra done_tx clone so done_rx closes when all workers exit.
     drop(done_tx);
 
-    // ── reader + writer (main thread) ────────────────────────────────────────
-    // Spawn the reader as a separate thread so the main thread can act as writer.
     let batch_size = cfg.embedding.batch_size;
-    let reader_handle = {
-        let db_path = cfg.paths.db_path.clone();
-        let is_incremental = matches!(embed_mode, EmbedMode::Incremental);
-
+    let db_path = cfg.paths.db_path.clone();
+    let is_incremental = matches!(embed_mode, EmbedMode::Incremental);
+    let reader_handle =
         std::thread::spawn(move || -> Result<(usize, usize, usize, usize), String> {
-            // Scan through a separate read-only handle so the long-lived chunk
-            // iterator does not share writer-side file/version state.
             let reader_db =
                 storage::open_db_read_only(&db_path).map_err(|e| format!("open reader db: {e}"))?;
             let chunks_cf = storage::cf(&reader_db, storage::CF_CHUNKS)
@@ -224,21 +281,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(value) = iter.value() else { break };
                 seen += 1;
 
-                // Incremental mode: use RocksDB Bloom filter for a near-free existence check.
-                // key_may_exist_cf is O(1) and avoids loading all keys into RAM.
                 if is_incremental {
                     let may_exist = reader_db.key_may_exist_cf(embeddings_cf_r, key);
                     if may_exist {
-                        // Bloom filter says "maybe" — confirm with a point read.
                         let exists = reader_db
                             .get_cf(embeddings_cf_r, key)
-                            .map(|v| v.is_some())
+                            .map(|value| value.is_some())
                             .unwrap_or(false);
                         if exists {
                             skipped_existing += 1;
-                            if skipped_existing % 50_000 == 0 {
-                                tracing::info!(scanned = seen, skipped_existing, "scanning…");
-                            }
                             iter.next();
                             continue;
                         }
@@ -247,26 +298,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !is_leaf_fast(value) {
                     skipped_non_leaf += 1;
-                    if seen % 100_000 == 0 {
-                        tracing::info!(
-                            scanned = seen,
-                            skipped_non_leaf,
-                            skipped_existing,
-                            "scanning…"
-                        );
-                    }
                     iter.next();
                     continue;
                 }
 
                 let chunk: Chunk = match serde_json::from_slice(value) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(
-                            key = %String::from_utf8_lossy(key),
-                            error = %e,
-                            "skipping malformed chunk"
-                        );
+                    Ok(chunk) => chunk,
+                    Err(_) => {
                         skipped_malformed += 1;
                         iter.next();
                         continue;
@@ -284,23 +322,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         })
                         .is_err()
                     {
-                        break; // writer died, abort
+                        break;
                     }
                 }
 
                 iter.next();
             }
 
-            // Final partial batch.
             if !texts.is_empty() {
                 let _ = work_tx.send(WorkItem { ids, texts });
             }
 
             Ok((seen, skipped_existing, skipped_non_leaf, skipped_malformed))
-        })
-    };
+        });
 
-    // ── writer loop (main thread) ────────────────────────────────────────────
     let mut write_opts = WriteOptions::default();
     write_opts.disable_wal(true);
 
@@ -308,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_flush_at = 0usize;
     let mut total_embed_dur = std::time::Duration::ZERO;
     let mut total_write_dur = std::time::Duration::ZERO;
-    let t_loop = Instant::now();
+    let started = Instant::now();
 
     while let Ok(DoneItem {
         ids,
@@ -316,47 +351,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         embed_dur,
     }) = done_rx.recv()
     {
-        let n = ids.len();
         total_embed_dur += embed_dur;
 
         let t_write = Instant::now();
         let mut wb = WriteBatch::default();
-        for (i, vec) in vectors.iter().enumerate() {
-            wb.put_cf(embeddings_cf, &ids[i], cast_slice(vec.as_slice()));
+        for (i, vector) in vectors.iter().enumerate() {
+            wb.put_cf(embeddings_cf, &ids[i], cast_slice(vector.as_slice()));
         }
         db.write_opt(wb, &write_opts)?;
-        let write_dur = t_write.elapsed();
-        total_write_dur += write_dur;
+        total_write_dur += t_write.elapsed();
+        embedded += ids.len();
 
-        embedded += n;
-
-        debug!(
-            batch_size = n,
-            embed_ms = embed_dur.as_millis() as u64,
-            write_ms = write_dur.as_millis() as u64,
-            "batch complete"
-        );
+        debug!(batch_size = ids.len(), "full-scan embed batch complete");
 
         if embedded - last_flush_at >= FLUSH_EVERY {
-            let t_flush = Instant::now();
             let _ = db.flush_cf(embeddings_cf);
-            let flush_ms = t_flush.elapsed().as_millis() as u64;
             last_flush_at = embedded;
-
-            let elapsed = t_loop.elapsed().as_secs_f64();
-            let rate = if elapsed > 0.0 {
-                embedded as f64 / elapsed
-            } else {
-                0.0
-            };
-            info!(
-                embedded,
-                rate_per_sec = format_args!("{rate:.0}"),
-                flush_ms,
-                "progress (flushed)"
-            );
-        } else if embedded % 2_000 == 0 {
-            let elapsed = t_loop.elapsed().as_secs_f64();
+            let elapsed = started.elapsed().as_secs_f64();
             let rate = if elapsed > 0.0 {
                 embedded as f64 / elapsed
             } else {
@@ -370,7 +381,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Wait for worker threads to finish.
     for handle in handles {
         let _ = handle.join();
     }
@@ -378,36 +388,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = db.flush_cf(embeddings_cf);
     let _ = db.flush_wal(true);
 
-    // Collect reader stats.
     let (seen, skipped_existing, skipped_non_leaf, skipped_malformed) = reader_handle
         .join()
         .map_err(|_| "reader thread panicked")??;
 
-    let wall = t_start.elapsed();
-    let loop_dur = t_loop.elapsed();
-
-    info!("─── embedding complete ───");
-    info!(scanned = seen, "total chunks scanned");
-    info!(embedded, "newly embedded");
-    info!(skipped_existing, "skipped (already embedded)");
-    info!(skipped_non_leaf, "skipped (non-leaf)");
-    info!(skipped_malformed, "skipped (malformed)");
+    let loop_dur = started.elapsed();
+    info!("─── full-scan embedding complete ───");
+    info!(
+        scanned = seen,
+        embedded, skipped_existing, skipped_non_leaf, skipped_malformed
+    );
     info!(
         embed_secs = format_args!("{:.1}", total_embed_dur.as_secs_f64()),
         write_secs = format_args!("{:.1}", total_write_dur.as_secs_f64()),
+        wall_secs = format_args!("{:.1}", loop_dur.as_secs_f64()),
         "time breakdown"
     );
-    if loop_dur.as_secs_f64() > 0.0 {
-        let rate = embedded as f64 / loop_dur.as_secs_f64();
-        info!(
-            rate_per_sec = format_args!("{rate:.0}"),
-            "average throughput"
-        );
-    }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let _ = rlimit::increase_nofile_limit(10240);
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,ort=warn,ort_sys=warn")
+            }),
+        )
+        .with_target(false)
+        .with_timer(tracing_subscriber::fmt::time::uptime())
+        .init();
+
+    let cfg = config::load()?;
     info!(
-        wall_secs = format_args!("{:.1}", wall.as_secs_f64()),
-        "total wall time"
+        backend = %cfg.embedding.backend,
+        model = %cfg.embedding.model,
+        dim = cfg.embedding.dim,
+        batch_size = cfg.embedding.batch_size,
+        max_length = cfg.embedding.max_length.unwrap_or(256),
+        bulk_workers = cfg.embedding.bulk_workers,
+        bulk_intra_threads = cfg.embedding.bulk_intra_threads,
+        "embedding config"
     );
 
-    Ok(())
+    if has_flag("--full-scan") {
+        let db = std::sync::Arc::new(storage::open_db_for_bulk_write(&cfg.paths.db_path)?);
+        return run_full_scan(&cfg, db);
+    }
+
+    let db = storage::open_db_for_bulk_write(&cfg.paths.db_path)?;
+    run_embed_queue(&cfg, &db)
 }

@@ -13,6 +13,11 @@ pub const CF_CLICKS: &str = "clicks";
 pub const CF_WIKI: &str = "wiki";
 pub const CF_WIKI_EMBEDDINGS: &str = "wiki_embeddings";
 pub const CF_NORMALIZE_QUEUE: &str = "normalize_queue";
+pub const CF_PAGE_STATE: &str = "page_state";
+pub const CF_EMBED_QUEUE: &str = "embed_queue";
+pub const CF_VECTOR_QUEUE: &str = "vector_queue";
+pub const CF_LEXICAL_QUEUE: &str = "lexical_queue";
+pub const CF_VECTOR_TOMBSTONES: &str = "vector_tombstones";
 
 pub fn all_cf_names() -> Vec<&'static str> {
     vec![
@@ -27,6 +32,11 @@ pub fn all_cf_names() -> Vec<&'static str> {
         CF_WIKI,
         CF_WIKI_EMBEDDINGS,
         CF_NORMALIZE_QUEUE,
+        CF_PAGE_STATE,
+        CF_EMBED_QUEUE,
+        CF_VECTOR_QUEUE,
+        CF_LEXICAL_QUEUE,
+        CF_VECTOR_TOMBSTONES,
     ]
 }
 

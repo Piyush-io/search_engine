@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, path::Path, sync::Arc};
 
 use axum::{
     Router,
@@ -15,8 +15,8 @@ use search_engine::{
     embeddings::client,
     knowledge::panel,
     search::{
-        bruteforce::BruteForceIndex, hnsw::HnswIndex, lexical::LexicalIndex, query,
-        vector_index::VectorIndex,
+        bruteforce::BruteForceIndex, composite::CompositeVectorIndex, hnsw::HnswIndex,
+        lexical::LexicalIndex, query, vector_index::VectorIndex,
     },
     storage,
     web::{serp, tracking},
@@ -52,23 +52,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let t0 = std::time::Instant::now();
     let index: Arc<dyn VectorIndex> = if index_backend == "bruteforce" {
-        let idx = match BruteForceIndex::load_from_path(&cfg.paths.index_path) {
-            Ok(idx) => idx,
-            Err(_) => BruteForceIndex::new(cfg.embedding.dim),
+        let idx = if Path::new(&cfg.paths.index_path).exists() {
+            BruteForceIndex::load_from_path(&cfg.paths.index_path)?
+        } else {
+            BruteForceIndex::new(cfg.embedding.dim)
         };
         Arc::new(idx)
     } else {
-        let idx = match HnswIndex::load_from_path(&cfg.paths.index_path) {
-            Ok(idx) => idx,
-            Err(_) => HnswIndex::with_params(
+        let base_index: Arc<dyn VectorIndex> = if Path::new(&cfg.paths.index_path).exists() {
+            Arc::new(HnswIndex::load_from_path(&cfg.paths.index_path)?)
+        } else {
+            Arc::new(HnswIndex::with_params(
                 cfg.embedding.dim,
                 cfg.hnsw.m,
                 cfg.hnsw.ef_construction,
                 cfg.hnsw.ef_search,
                 cfg.hnsw.max_elements,
-            ),
+            ))
         };
-        Arc::new(idx)
+
+        let delta = if Path::new(&cfg.paths.vector_delta_path).exists() {
+            Some(BruteForceIndex::load_from_path(
+                &cfg.paths.vector_delta_path,
+            )?)
+        } else {
+            None
+        };
+        let tombstones = load_chunk_ids_from_cf(&db, storage::CF_VECTOR_TOMBSTONES)?;
+
+        Arc::new(CompositeVectorIndex::new(base_index, delta, tombstones))
     };
 
     println!(
@@ -78,9 +90,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         t0.elapsed().as_secs_f64(),
     );
 
-    let lexical = LexicalIndex::open(&cfg.paths.lexical_index_path)
-        .ok()
-        .map(Arc::new);
+    let lexical_meta = Path::new(&cfg.paths.lexical_index_path).join("meta.json");
+    let lexical = if lexical_meta.exists() {
+        Some(Arc::new(LexicalIndex::open(&cfg.paths.lexical_index_path)?))
+    } else {
+        None
+    };
 
     let state = AppState { db, index, lexical };
 
@@ -175,4 +190,17 @@ fn click_key(query: &str, position: usize, target: &str) -> String {
             .as_bytes(),
     );
     format!("{:x}", h.finalize())
+}
+
+fn load_chunk_ids_from_cf(
+    db: &rocksdb::DB,
+    name: &str,
+) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
+    let cf = storage::cf(db, name)?;
+    let mut out = HashSet::new();
+    for item in db.iterator_cf(cf, rocksdb::IteratorMode::Start) {
+        let (key, _) = item?;
+        out.insert(String::from_utf8(key.to_vec())?);
+    }
+    Ok(out)
 }

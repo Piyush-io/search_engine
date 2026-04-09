@@ -7,18 +7,18 @@ rate_limit_ms = 100
 backend = "cuda"            # GTX 1660 SUPER — use CUDA EP directly
 model = "bge-small-en-v1.5"
 dim = 384
-batch_size = 1024           # A10G 24GB VRAM handles large batches; safe on 1660S too (ORT auto-splits)
+batch_size = 64             # safer local rebuild size for 6GB VRAM
 max_length = 128            # chunks are ~60 tokens; halves inference time
-bulk_workers = 2            # 2 workers keep GPU saturated while one tokenizes
-bulk_intra_threads = 4      # CPU threads per worker for tokenization
+bulk_workers = 1            # single ORT session to reduce VRAM pressure
+bulk_intra_threads = 2      # lighter CPU parallelism during local bulk embedding
 
 [hnsw]
 backend = "hnsw"
 shards = 1
-m = 16
-ef_construction = 200       # quality-first default for better ANN recall during build
-ef_search = 200
-max_elements = 10_000_000
+m = 8
+ef_construction = 80        # lowered for local full-build RAM safety
+ef_search = 120
+max_elements = 5_000_000
 
 [chunking]
 context_depth = 3
@@ -36,3 +36,5 @@ db_path = "./crawl_data"
 index_path = "./hnsw_index.bin"
 lexical_index_path = "./lexical_index"
 wiki_index_path = "./wiki_hnsw.bin"
+vector_delta_path = "./hnsw_delta.bin"
+seeds_path = "./seeds.md"

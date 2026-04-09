@@ -1,12 +1,12 @@
-use std::sync::Arc;
-use std::collections::HashSet;
+use crate::crawler::types::{ParsedPage, RejectReason, UrlTask};
+use crate::crawler::{canon, policy, robots, scheduler::CrawlScheduler};
+use crate::storage;
 use dashmap::DashMap;
 use rocksdb::{DB, WriteBatch};
-use url::Url;
-use crate::crawler::types::{UrlTask, ParsedPage, RejectReason};
-use crate::crawler::{canon, policy, robots, scheduler::CrawlScheduler};
-use crate::{storage, PageRecord};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use url::Url;
 
 pub enum PersistCommand {
     Reject {
@@ -101,38 +101,68 @@ pub async fn persist_command(
     let mut wb = WriteBatch::default();
 
     match command {
-        PersistCommand::Reject { url: _, host, aliases, outlinks, reason: _, depth } => {
+        PersistCommand::Reject {
+            url: _,
+            host,
+            aliases,
+            outlinks,
+            reason: _,
+            depth,
+        } => {
             for alias in aliases {
                 wb.put_cf(seen_cf, alias.as_bytes(), []);
                 wb.delete_cf(to_crawl_cf, alias.as_bytes());
             }
             wb.put_cf(domains_cf, host.as_bytes(), now_ms().to_string().as_bytes());
 
-            let tasks = enqueue_outlinks(db, &mut wb, outlinks, per_domain_processed, robots_cache, depth + 1)?;
+            let tasks = enqueue_outlinks(
+                db,
+                &mut wb,
+                outlinks,
+                per_domain_processed,
+                robots_cache,
+                depth + 1,
+            )?;
             db.write(wb)?;
 
             for task in tasks {
                 scheduler.push_task(task).await;
             }
         }
-        PersistCommand::Accept { page, aliases, depth } => {
-            for alias in aliases {
-                wb.put_cf(seen_cf, alias.as_bytes(), []);
-                wb.delete_cf(to_crawl_cf, alias.as_bytes());
-            }
-            wb.put_cf(domains_cf, page.page_record.url.as_bytes(), now_ms().to_string().as_bytes());
-
-            let url_bytes = page.page_record.url.as_bytes();
-            wb.put_cf(content_cf, url_bytes, serde_json::to_vec(&page.page_record)?);
-            wb.put_cf(norm_queue_cf, url_bytes, []);
-
+        PersistCommand::Accept {
+            page,
+            aliases,
+            depth,
+        } => {
             let host = Url::parse(&page.page_record.url)?
                 .host_str()
                 .unwrap_or_default()
                 .to_string();
+
+            for alias in aliases {
+                wb.put_cf(seen_cf, alias.as_bytes(), []);
+                wb.delete_cf(to_crawl_cf, alias.as_bytes());
+            }
+            wb.put_cf(domains_cf, host.as_bytes(), now_ms().to_string().as_bytes());
+
+            let url_bytes = page.page_record.url.as_bytes();
+            wb.put_cf(
+                content_cf,
+                url_bytes,
+                serde_json::to_vec(&page.page_record)?,
+            );
+            wb.put_cf(norm_queue_cf, url_bytes, []);
+
             *per_domain_processed.entry(host).or_insert(0) += 1;
 
-            let tasks = enqueue_outlinks(db, &mut wb, page.outlinks, per_domain_processed, robots_cache, depth + 1)?;
+            let tasks = enqueue_outlinks(
+                db,
+                &mut wb,
+                page.outlinks,
+                per_domain_processed,
+                robots_cache,
+                depth + 1,
+            )?;
             db.write(wb)?;
 
             for task in tasks {
@@ -161,7 +191,8 @@ fn enqueue_outlinks(
             continue;
         }
 
-        let Some(task) = try_build_task(&raw_url, db, per_domain_processed, robots_cache, depth)? else {
+        let Some(task) = try_build_task(&raw_url, db, per_domain_processed, robots_cache, depth)?
+        else {
             continue;
         };
 

@@ -100,6 +100,7 @@ pub fn run_query(
 
     let query_tokens = tokenize_set(query_text);
     let short_query = query_tokens.len() <= 5;
+    let expanded_tokens = expand_query_tokens(&query_tokens);
     let expanded_query = build_expanded_query_text(query_text, &query_tokens);
 
     let lexical_hits = lexical
@@ -125,16 +126,21 @@ pub fn run_query(
                     continue;
                 }
 
-                let expanded_tokens = expand_query_tokens(&query_tokens);
                 let body_overlap = token_overlap(&expanded_tokens, &chunk.text);
+                let page_title = chunk
+                    .page_title
+                    .as_deref()
+                    .or_else(|| chunk.heading_chain.first().map(String::as_str))
+                    .unwrap_or("");
                 let section_title = chunk.heading_chain.last().map(String::as_str).unwrap_or("");
-                let title_overlap = token_overlap(&query_tokens, section_title);
+                let title_overlap = token_overlap(&query_tokens, page_title);
                 let heading_text = specific_heading_text(&chunk.heading_chain);
                 let heading_overlap = token_overlap(&query_tokens, &heading_text);
                 let heading_match_count = token_match_count(&query_tokens, &heading_text);
                 let vec_score = *vec_scores.get(&chunk.id).unwrap_or(&0.0);
                 let lex_score = *lex_scores.get(&chunk.id).unwrap_or(&0.0);
-                let exact_heading_phrase = contains_phrase(&query_phrase, section_title)
+                let exact_heading_phrase = contains_phrase(&query_phrase, page_title)
+                    || contains_phrase(&query_phrase, section_title)
                     || contains_phrase(&query_phrase, &heading_text);
                 let exact_body_phrase = contains_phrase(&query_phrase, &chunk.text);
 

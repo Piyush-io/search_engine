@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
 use hnsw_rs::api::AnnT;
@@ -21,7 +22,7 @@ struct PersistedIndex {
     ef_construction: usize,
     ef_search: usize,
     max_elements: usize,
-    entries: Vec<Entry>,
+    entries_len: usize,
 }
 
 /// Real ANN index backed by hnsw_rs.
@@ -131,53 +132,102 @@ impl HnswIndex {
             ef_construction: self.ef_construction,
             ef_search: self.ef_search,
             max_elements: self.max_elements,
-            entries: self.entries.clone(),
+            entries_len: self.entries.len(),
         };
 
-        // Dump metadata
-        let bytes = bincode::serialize(&persisted)?;
-        fs::write(path, bytes)?;
+        // Dump metadata + entries in a streamed format to reduce peak RAM.
+        let file = fs::File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serialize_into(&mut writer, &persisted)?;
+        bincode::serialize_into(&mut writer, &self.entries)?;
         Ok(())
     }
 
     pub fn load_from_path(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        // The Modal-built index uses the legacy format (single bincode blob with
+        // entries embedded).  Try legacy first, then the new streamed layout.
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct LegacyPersistedIndex {
+            dim: usize,
+            m: usize,
+            ef_construction: usize,
+            ef_search: usize,
+            max_elements: usize,
+            entries: Vec<Entry>,
+        }
+
         let bytes = fs::read(path)?;
-        let persisted: PersistedIndex = bincode::deserialize(&bytes)?;
+        let (persisted, entries): (PersistedIndex, Vec<Entry>) =
+            match bincode::deserialize::<LegacyPersistedIndex>(&bytes) {
+                Ok(legacy) => {
+                    tracing::info!(
+                        "loaded legacy format index ({} entries)",
+                        legacy.entries.len()
+                    );
+                    (
+                        PersistedIndex {
+                            dim: legacy.dim,
+                            m: legacy.m,
+                            ef_construction: legacy.ef_construction,
+                            ef_search: legacy.ef_search,
+                            max_elements: legacy.max_elements,
+                            entries_len: legacy.entries.len(),
+                        },
+                        legacy.entries,
+                    )
+                }
+                Err(_) => {
+                    // New streamed layout: PersistedIndex then Vec<Entry>.
+                    let mut reader2 = BufReader::new(std::io::Cursor::new(&bytes));
+                    let meta: PersistedIndex = bincode::deserialize_from(&mut reader2)?;
+                    let loaded_entries: Vec<Entry> = bincode::deserialize_from(&mut reader2)?;
+                    (meta, loaded_entries)
+                }
+            };
 
         let p = Path::new(path);
         let parent = p.parent().unwrap_or(Path::new("."));
         let basename = p.file_name().unwrap_or_default().to_string_lossy();
         let graph_path = parent.join(format!("{}.hnsw.graph", basename));
 
+        tracing::info!(
+            "loading HNSW metadata: entries={} dim={} graph_exists={}",
+            persisted.entries_len,
+            persisted.dim,
+            graph_path.exists()
+        );
+
         let mut idx = Self::with_params(
             persisted.dim,
             persisted.m,
             persisted.ef_construction,
             persisted.ef_search,
-            persisted.max_elements.max(persisted.entries.len()),
+            persisted.max_elements.max(persisted.entries_len),
         );
 
         if graph_path.exists() {
             tracing::info!("Found HNSW graph dump, loading instantly...");
             let io = Box::leak(Box::new(HnswIo::new(parent, &basename)));
             idx.hnsw = io.load_hnsw()?;
-            idx.entries = persisted.entries;
-            // Clear vectors from memory to save RAM, since they are inside the memory mapped graph
+            idx.entries = entries;
+            // Drop vector payloads aggressively after graph mmap is loaded.
             for e in &mut idx.entries {
-                e.vector.clear();
-                e.vector.shrink_to_fit();
+                e.vector = Vec::new();
             }
+            tracing::info!("HNSW graph loaded. entries={}", idx.entries.len());
         } else {
             tracing::info!("No HNSW graph dump found, rebuilding from entries...");
-            for mut e in persisted.entries {
+            for (i, mut e) in entries.into_iter().enumerate() {
                 let vec = std::mem::take(&mut e.vector);
                 idx.insert(e.chunk_id.clone(), vec);
+                if (i + 1) % 200_000 == 0 {
+                    tracing::info!("rebuild progress: inserted={}", i + 1);
+                }
             }
 
-            // Clear vectors from memory after insert
+            // Drop vector payloads aggressively after rebuild.
             for e in &mut idx.entries {
-                e.vector.clear();
-                e.vector.shrink_to_fit();
+                e.vector = Vec::new();
             }
 
             tracing::info!("Rebuild complete, saving fast dump...");

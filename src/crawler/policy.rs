@@ -1,5 +1,4 @@
 use url::Url;
-use crate::crawler::canon;
 
 const MAX_DISCOVERED_PER_PAGE: usize = 200;
 const MAX_CHUNKS_PER_PAGE: usize = 220;
@@ -8,6 +7,12 @@ pub fn host_matches_rule(host: &str, rule: &str) -> bool {
     let host = host.strip_prefix("www.").unwrap_or(host);
     let rule = rule.strip_prefix("www.").unwrap_or(rule);
     host == rule || host.ends_with(&format!(".{rule}"))
+}
+
+fn host_matches_exact_rule(host: &str, rule: &str) -> bool {
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let rule = rule.strip_prefix("www.").unwrap_or(rule);
+    host == rule
 }
 
 pub fn domain_rate_limit_ms(default_ms: u64, host: &str) -> u64 {
@@ -106,12 +111,15 @@ pub fn domain_cap(host: &str) -> usize {
         "en.wikipedia.org" => 12_000,
         "docs.rs" => 30_000,
         "go.dev" => 20_000,
+        "pkg.go.dev" => 20_000,
         "kubernetes.io" => 20_000,
         "learn.microsoft.com" => 25_000,
         "docs.oracle.com" => 20_000,
         "hexdocs.pm" => 20_000,
+        "docs.aws.amazon.com" => 20_000,
         "www.postgresql.org" => 20_000,
         "www.kernel.org" => 20_000,
+        "docs.kernel.org" => 20_000,
         "llvm.org" => 15_000,
         "docs.docker.com" => 15_000,
         "docs.ansible.com" => 15_000,
@@ -282,6 +290,7 @@ pub fn host_allowed(host: &str) -> bool {
         "research.google",
         "docs.rs",
         "go.dev",
+        "pkg.go.dev",
         "nodejs.org",
         "kubernetes.io",
         "docs.docker.com",
@@ -295,6 +304,8 @@ pub fn host_allowed(host: &str) -> bool {
         "highscalability.com",
         "engineering.fb.com",
         "aws.amazon.com",
+        "www.aws.amazon.com",
+        "docs.aws.amazon.com",
         "developers.googleblog.com",
         "techcrunch.com",
         "simonwillison.net",
@@ -350,6 +361,7 @@ pub fn host_allowed(host: &str) -> bool {
         "cstheory.stackexchange.com",
         "norvig.com",
         "www.kernel.org",
+        "docs.kernel.org",
         "www.brendangregg.com",
         "pages.cs.wisc.edu",
         "pdos.csail.mit.edu",
@@ -407,7 +419,7 @@ pub fn host_allowed(host: &str) -> bool {
         "www.nand2tetris.org",
     ];
 
-    allow.iter().any(|rule| host_matches_rule(host, rule))
+    allow.iter().any(|rule| host_matches_exact_rule(host, rule))
 }
 
 pub fn path_looks_binary(path: &str) -> bool {
@@ -440,8 +452,17 @@ pub fn score_url(url: &Url, depth: u16) -> i32 {
 
     // High signal boost
     let high_signal = [
-        "/docs/", "/api/", "/guide/", "/tutorial/", "/manual/", "/reference/",
-        "/wiki/", "/blog/", "/articles/", "/post/", "/news/",
+        "/docs/",
+        "/api/",
+        "/guide/",
+        "/tutorial/",
+        "/manual/",
+        "/reference/",
+        "/wiki/",
+        "/blog/",
+        "/articles/",
+        "/post/",
+        "/news/",
     ];
     if high_signal.iter().any(|p| path.contains(p)) {
         score += 50;
@@ -449,8 +470,19 @@ pub fn score_url(url: &Url, depth: u16) -> i32 {
 
     // Low signal penalty
     let low_signal = [
-        "/tag/", "/category/", "/archive/", "/search/", "/page/", "/index/",
-        "/commit/", "/diff/", "/blob/", "/source/", "/raw/", "/v-", "/rev-",
+        "/tag/",
+        "/category/",
+        "/archive/",
+        "/search/",
+        "/page/",
+        "/index/",
+        "/commit/",
+        "/diff/",
+        "/blob/",
+        "/source/",
+        "/raw/",
+        "/v-",
+        "/rev-",
     ];
     if low_signal.iter().any(|p| path.contains(p)) {
         score -= 70;
@@ -463,8 +495,12 @@ pub fn score_url(url: &Url, depth: u16) -> i32 {
 
     // Boost S-Tier domains
     let s_tier = [
-        "docs.rs", "doc.rust-lang.org", "docs.python.org", "en.cppreference.com",
-        "developer.mozilla.org", "en.wikipedia.org"
+        "docs.rs",
+        "doc.rust-lang.org",
+        "docs.python.org",
+        "en.cppreference.com",
+        "developer.mozilla.org",
+        "en.wikipedia.org",
     ];
     if s_tier.iter().any(|d| host_matches_rule(&host, d)) {
         score += 30;
@@ -620,8 +656,17 @@ pub fn url_allowed(url: &Url) -> bool {
             return false;
         }
         let blocked_prefixes = [
-            "/about", "/help", "/membership", "/m/signin", "/m/signout", "/search", "/tag/",
-            "/topics", "/me", "/following", "/followers",
+            "/about",
+            "/help",
+            "/membership",
+            "/m/signin",
+            "/m/signout",
+            "/search",
+            "/tag/",
+            "/topics",
+            "/me",
+            "/following",
+            "/followers",
         ];
         if blocked_prefixes
             .iter()
@@ -655,7 +700,14 @@ pub fn url_allowed(url: &Url) -> bool {
     }
 
     let blocked_params = [
-        "action", "oldid", "diff", "lastactivity", "answertab", "tab", "printable", "veaction",
+        "action",
+        "oldid",
+        "diff",
+        "lastactivity",
+        "answertab",
+        "tab",
+        "printable",
+        "veaction",
         "search",
     ];
 
@@ -679,4 +731,29 @@ pub fn url_allowed(url: &Url) -> bool {
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_allowlist_blocks_unwanted_subdomains() {
+        assert!(host_allowed("docs.kernel.org"));
+        assert!(host_allowed("docs.aws.amazon.com"));
+        assert!(!host_allowed("community.grafana.com"));
+        assert!(!host_allowed("reviews.llvm.org"));
+        assert!(!host_allowed("commitfest.postgresql.org"));
+    }
+
+    #[test]
+    fn url_policy_rejects_noisy_subdomains() {
+        let noisy = Url::parse("https://discuss.elastic.co/t/some-thread").unwrap();
+        let low_signal = Url::parse("https://commitfest.postgresql.org/42/").unwrap();
+        let allowed = Url::parse("https://docs.kernel.org/core-api/index.html").unwrap();
+
+        assert!(!url_allowed(&noisy));
+        assert!(!url_allowed(&low_signal));
+        assert!(url_allowed(&allowed));
+    }
 }

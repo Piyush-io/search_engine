@@ -30,12 +30,45 @@ impl BruteForceIndex {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn insert(&mut self, chunk_id: ChunkId, vector: EmbeddingVec) {
         if vector.len() != self.dim {
             return;
         }
 
         self.entries.push(Entry { chunk_id, vector });
+    }
+
+    pub fn upsert(&mut self, chunk_id: ChunkId, vector: EmbeddingVec) {
+        if vector.len() != self.dim {
+            return;
+        }
+
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.chunk_id == chunk_id)
+        {
+            entry.vector = vector;
+            return;
+        }
+
+        self.entries.push(Entry { chunk_id, vector });
+    }
+
+    pub fn remove(&mut self, chunk_id: &str) -> bool {
+        if let Some(pos) = self
+            .entries
+            .iter()
+            .position(|entry| entry.chunk_id == chunk_id)
+        {
+            self.entries.swap_remove(pos);
+            return true;
+        }
+        false
     }
 
     pub fn search(&self, query: &EmbeddingVec, k: usize) -> Vec<(ChunkId, f32)> {

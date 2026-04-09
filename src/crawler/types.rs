@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::PageRecord;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RejectReason {
@@ -61,7 +61,8 @@ pub struct UrlTask {
 impl Ord for UrlTask {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Higher priority first
-        self.priority.cmp(&other.priority)
+        self.priority
+            .cmp(&other.priority)
             .then_with(|| other.depth.cmp(&self.depth)) // Shallower depth first if priority equal
     }
 }

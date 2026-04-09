@@ -1,9 +1,9 @@
-use url::Url;
-use scraper::{Html, Selector};
-use std::collections::HashSet;
-use crate::crawler::types::{FetchResult, ParsedPage, PageQuality, RejectReason};
+use crate::crawler::types::{FetchResult, PageQuality, ParsedPage, RejectReason};
 use crate::crawler::{canon, policy};
 use crate::extraction::normalizer;
+use scraper::{Html, Selector};
+use std::collections::HashSet;
+use url::Url;
 
 const MIN_PAGE_TEXT_BYTES: usize = 400;
 const MIN_PAGE_BLOCKS: usize = 2;
@@ -16,7 +16,7 @@ pub fn parse_result(result: FetchResult) -> Result<ParsedPage, RejectReason> {
 
     let (mut page, cleaned, meta) =
         normalizer::normalize_with_cleaned(&result.html, &result.final_url);
-    
+
     let canonical_url = resolve_page_canonical(&base, meta.canonical_url.as_deref())
         .map(|u| u.to_string())
         .unwrap_or_else(|| result.final_url.clone());
@@ -29,13 +29,13 @@ pub fn parse_result(result: FetchResult) -> Result<ParsedPage, RejectReason> {
     }
 
     let text_bytes: usize = page.blocks.iter().map(|block| block.text.len()).sum();
-    
+
     // Quality check
     let block_count = page.blocks.len();
     let link_density = calculate_link_density(&cleaned);
-    
+
     let is_low_quality = block_count < MIN_PAGE_BLOCKS || text_bytes < MIN_PAGE_TEXT_BYTES;
-    
+
     if is_low_quality {
         return Err(RejectReason::LowText);
     }
@@ -116,15 +116,17 @@ fn calculate_link_density(html: &str) -> f32 {
     let document = Html::parse_document(html);
     let text_selector = Selector::parse("*").unwrap();
     let link_selector = Selector::parse("a").unwrap();
-    
-    let total_text_len: usize = document.select(&text_selector)
+
+    let total_text_len: usize = document
+        .select(&text_selector)
         .map(|n| n.text().collect::<String>().len())
         .sum();
-    
-    let link_text_len: usize = document.select(&link_selector)
+
+    let link_text_len: usize = document
+        .select(&link_selector)
         .map(|n| n.text().collect::<String>().len())
         .sum();
-    
+
     if total_text_len == 0 {
         0.0
     } else {

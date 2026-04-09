@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -7,6 +8,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use regex::Regex;
 use reqwest::Client;
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::{sleep, timeout};
@@ -16,171 +18,39 @@ use rocksdb::DB;
 use search_engine::{
     config,
     crawler::{
-        fetch, parse, persist, recover, robots, scheduler::CrawlScheduler,
-        types::{RejectReason, UrlTask, FetchResult},
+        fetch, parse, persist,
         persist::PersistCommand,
+        recover, robots,
+        scheduler::CrawlScheduler,
+        types::{FetchResult, RejectReason},
     },
     storage,
 };
 
-const SEED_URLS: &[&str] = &[
-    "https://doc.rust-lang.org/",
-    "https://docs.python.org/3/",
-    "https://developer.mozilla.org/en-US/docs/Web/JavaScript",
-    "https://en.wikipedia.org/wiki/Computer_science",
-    "https://stackoverflow.com/questions/tagged/algorithms",
-    "https://blog.rust-lang.org/",
-    "https://blog.cloudflare.com/",
-    "https://jvns.ca/",
-    "https://martinfowler.com/",
-    "https://blog.acolyer.org/",
-    "https://eng.uber.com/",
-    "https://netflixtechblog.com/",
-    "https://research.google/blog/",
-    "https://cppreference.com/",
-    "https://docs.rs/tokio/latest/tokio/",
-    "https://go.dev/doc/",
-    "https://nodejs.org/en/docs/",
-    "https://kubernetes.io/docs/home/",
-    "https://docs.docker.com/",
-    "https://learn.microsoft.com/en-us/dotnet/",
-    "https://docs.julialang.org/en/v1/",
-    "https://news.ycombinator.com/",
-    "https://dev.to/",
-    "https://medium.com/tag/programming",
-    "https://www.infoq.com/",
-    "https://thenewstack.io/",
-    "https://highscalability.com/",
-    "https://engineering.fb.com/",
-    "https://aws.amazon.com/blogs/architecture/",
-    "https://developers.googleblog.com/",
-    "https://techcrunch.com/category/artificial-intelligence/",
-    "https://simonwillison.net/",
-    "https://www.joelonsoftware.com/",
-    "https://danluu.com/",
-    "https://rachelbythebay.com/w/",
-    "https://without.boats/blog/",
-    "https://matklad.github.io/",
-    "https://arxiv.org/list/cs.LG/recent",
-    "https://arxiv.org/list/cs.DS/recent",
-    "https://arxiv.org/list/cs.DC/recent",
-    "https://paperswithcode.com/",
-    "https://distill.pub/",
-    "https://cacm.acm.org/",
-    "https://people.csail.mit.edu/",
-    "https://cs.stanford.edu/",
-    "https://ocw.mit.edu/courses/electrical-engineering-and-computer-science/",
-    "https://en.wikipedia.org/wiki/Algorithm",
-    "https://en.wikipedia.org/wiki/Data_structure",
-    "https://en.wikipedia.org/wiki/Machine_learning",
-    "https://en.wikipedia.org/wiki/Operating_system",
-    "https://en.wikipedia.org/wiki/Distributed_computing",
-    "https://en.wikipedia.org/wiki/Programming_language",
-    "https://en.wikipedia.org/wiki/Database",
-    "https://en.wikipedia.org/wiki/Computer_network",
-    "https://en.wikipedia.org/wiki/Compiler",
-    "https://ask.ubuntu.com/",
-    "https://unix.stackexchange.com/",
-    "https://doc.rust-lang.org/reference/",
-    "https://doc.rust-lang.org/nomicon/",
-    "https://doc.rust-lang.org/rust-by-example/",
-    "https://docs.swift.org/swift-book/",
-    "https://kotlinlang.org/docs/",
-    "https://docs.scala-lang.org/",
-    "https://clojure.org/reference/",
-    "https://elixir-lang.org/docs.html",
-    "https://hexdocs.pm/elixir/",
-    "https://www.haskell.org/documentation/",
-    "https://wiki.haskell.org/",
-    "https://ziglang.org/documentation/",
-    "https://docs.oracle.com/en/java/javase/21/docs/api/",
-    "https://slack.engineering/",
-    "https://dropbox.tech/",
-    "https://shopify.engineering/",
-    "https://www.databricks.com/blog/engineering",
-    "https://grafana.com/blog/",
-    "https://www.elastic.co/blog/",
-    "https://systemdesign.one/",
-    "https://www.oreilly.com/radar/",
-    "https://microservices.io/patterns/",
-    "https://12factor.net/",
-    "https://sre.google/sre-book/",
-    "https://sre.google/workbook/",
-    "https://owasp.org/www-project-top-ten/",
-    "https://cheatsheetseries.owasp.org/",
-    "https://portswigger.net/web-security",
-    "https://www.schneier.com/blog/",
-    "https://www.terraform.io/docs/",
-    "https://docs.ansible.com/",
-    "https://prometheus.io/docs/",
-    "https://opentelemetry.io/docs/",
-    "https://kafka.apache.org/documentation/",
-    "https://redis.io/docs/",
-    "https://www.postgresql.org/docs/",
-    "https://sqlite.org/docs.html",
-    "https://cp-algorithms.com",
-    "https://cstheory.stackexchange.com/questions",
-    "https://norvig.com",
-    "https://www.kernel.org/doc/html/latest/",
-    "https://www.brendangregg.com/blog/index.html",
-    "https://pages.cs.wisc.edu/~remzi/OSTEP/",
-    "https://pdos.csail.mit.edu/6.828/2023/schedule.html",
-    "https://os.phil-opp.com",
-    "https://www.linuxfromscratch.org/lfs/view/stable/",
-    "https://lwn.net/Kernel/Index/",
-    "https://www.agner.org/optimize/",
-    "https://uops.info/table.html",
-    "https://sandpile.org",
-    "https://book.rvemu.app",
-    "https://llvm.org/docs/",
-    "https://clang.llvm.org/docs/",
-    "https://gcc.gnu.org/onlinedocs/gcc/",
-    "https://craftinginterpreters.com/contents.html",
-    "https://eli.thegreenplace.net",
-    "https://www.cs.cornell.edu/courses/cs6120/2020fa/blog/",
-    "https://swtch.com/~rsc/regexp/",
-    "https://softwarefoundations.cis.upenn.edu",
-    "https://homotopytypetheory.org/book/",
-    "https://xavierleroy.org",
-    "https://faultlore.com/blah/",
-    "https://www.scattered-thoughts.net",
-    "https://www.interdb.jp/pg/",
-    "https://15445.courses.cs.cmu.edu/fall2024/",
-    "https://15721.courses.cs.cmu.edu/spring2024/",
-    "https://www.cockroachlabs.com/blog/",
-    "https://jepsen.io/analyses",
-    "https://martin.kleppmann.com",
-    "https://muratbuffalo.blogspot.com",
-    "https://fly.io/blog/",
-    "https://explained.ai",
-    "https://cs231n.github.io",
-    "https://nlp.stanford.edu/IR-book/html/htmledition/",
-    "https://learnopengl.com",
-    "https://vulkan-tutorial.com",
-    "https://raytracing.github.io",
-    "https://beej.us/guide/bgnet/html/",
-    "https://hacks.mozilla.org",
-    "https://webassembly.org",
-    "https://cryptopals.com",
-    "https://blog.cryptographyengineering.com",
-    "https://www.usenix.org/publications/proceedings/",
-    "https://isocpp.org/faq",
-    "https://abseil.io/docs/cpp/",
-    "https://beej.us/guide/bgc/html/",
-    "https://paulgraham.com/articles.html",
-    "https://thume.ca",
-    "https://lamport.azurewebsites.net/tla/tla.html",
-    "https://coq.inria.fr/documentation",
-    "https://www.cl.cam.ac.uk/~pes20/weakmemory/",
-    "https://interrupt.memfault.com/blog",
-    "https://quantum.country/qcvc",
-    "https://learn.qiskit.org",
-    "https://missing.csail.mit.edu",
-    "https://staffeng.com/guides/",
-    "https://www.nand2tetris.org/course",
-];
-
 const PROCESS_ONE_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn load_seed_urls(path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(path)?;
+    let re = Regex::new(r#"https://[^\s`|<>()\"]+"#)?;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    for m in re.find_iter(&text) {
+        let url = m
+            .as_str()
+            .trim_end_matches(&['.', ',', ';', ')', ']'][..])
+            .to_string();
+        if seen.insert(url.clone()) {
+            out.push(url);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(format!("no https seed URLs found in {}", path).into());
+    }
+
+    Ok(out)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -194,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_init();
 
     let cfg = Arc::new(config::load()?);
+    let seed_urls = load_seed_urls(&cfg.paths.seeds_path)?;
     let db = Arc::new(storage::open_db_with_cache(
         &cfg.paths.db_path,
         cfg.rocksdb.block_cache_mb,
@@ -212,18 +83,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if existing_pages >= cfg.crawl.max_pages {
-        println!("[crawl] target already reached ({} >= {}), nothing to do", existing_pages, cfg.crawl.max_pages);
+        println!(
+            "[crawl] target already reached ({} >= {}), nothing to do",
+            existing_pages, cfg.crawl.max_pages
+        );
         return Ok(());
     }
 
     let scheduler = Arc::new(CrawlScheduler::new(cfg.crawl.rate_limit_ms));
     let robots_cache = robots::new_cache();
-    let (frontier_loaded, frontier_purged) =
-        recover::load_frontier_into_scheduler(&db, &scheduler, &per_domain_processed, &robots_cache).await?;
-    println!("[crawl] frontier recovered: {} live, {} purged", frontier_loaded, frontier_purged);
+    let (frontier_loaded, frontier_purged) = recover::load_frontier_into_scheduler(
+        &db,
+        &scheduler,
+        &per_domain_processed,
+        &robots_cache,
+    )
+    .await?;
+    println!(
+        "[crawl] frontier recovered: {} live, {} purged",
+        frontier_loaded, frontier_purged
+    );
 
-    let seeded = recover::seed_frontier(SEED_URLS, &db, &scheduler, &per_domain_processed, &robots_cache).await?;
-    println!("[crawl] seeded {} curated URLs", seeded);
+    let seeded = recover::seed_frontier(
+        &seed_urls,
+        &db,
+        &scheduler,
+        &per_domain_processed,
+        &robots_cache,
+    )
+    .await?;
+    println!(
+        "[crawl] loaded {} seeds from {} and enqueued {} fresh URLs",
+        seed_urls.len(),
+        cfg.paths.seeds_path,
+        seeded
+    );
 
     let client = Arc::new(
         Client::builder()
@@ -231,7 +125,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .read_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
             .user_agent("search-engine-crawler/0.2")
-            .danger_accept_invalid_certs(true)
             .build()?,
     );
 
@@ -241,7 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max(2);
 
     let (parse_tx, parse_rx) = mpsc::channel::<FetchResult>(cfg.crawl.concurrency.max(1) * 2);
-    let (persist_tx, persist_rx) = mpsc::channel::<PersistCommand>(cfg.crawl.concurrency.max(1) * 4);
+    let (persist_tx, persist_rx) =
+        mpsc::channel::<PersistCommand>(cfg.crawl.concurrency.max(1) * 4);
 
     let dns_ok_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
     let processed_pages = Arc::new(AtomicUsize::new(0));
@@ -272,33 +166,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut guard = parse_rx.lock().await;
                     guard.recv().await
                 };
-                let Some(payload) = next else { break; };
+                let Some(payload) = next else {
+                    break;
+                };
 
                 let depth = payload.task.depth;
-                let command = match tokio::task::spawn_blocking(move || parse::parse_result(payload)).await {
-                    Ok(Ok(page)) => {
-                        let aliases = vec![page.page_record.url.clone()];
-                        PersistCommand::Accept { page, aliases, depth }
-                    },
-                    Ok(Err(reason)) => {
-                        PersistCommand::Reject { 
-                            url: String::new(), 
-                            host: String::new(), 
-                            aliases: Vec::new(), 
-                            outlinks: Vec::new(), 
+                let command =
+                    match tokio::task::spawn_blocking(move || parse::parse_result(payload)).await {
+                        Ok(Ok(page)) => {
+                            let aliases = vec![page.page_record.url.clone()];
+                            PersistCommand::Accept {
+                                page,
+                                aliases,
+                                depth,
+                            }
+                        }
+                        Ok(Err(reason)) => PersistCommand::Reject {
+                            url: String::new(),
+                            host: String::new(),
+                            aliases: Vec::new(),
+                            outlinks: Vec::new(),
                             reason,
                             depth,
-                        }
-                    },
-                    Err(_) => PersistCommand::Reject { 
-                        url: String::new(), 
-                        host: String::new(), 
-                        aliases: Vec::new(), 
-                        outlinks: Vec::new(), 
-                        reason: RejectReason::ParsePanic,
-                        depth,
-                    },
-                };
+                        },
+                        Err(_) => PersistCommand::Reject {
+                            url: String::new(),
+                            host: String::new(),
+                            aliases: Vec::new(),
+                            outlinks: Vec::new(),
+                            reason: RejectReason::ParsePanic,
+                            depth,
+                        },
+                    };
 
                 persist_pending.fetch_add(1, Ordering::SeqCst);
                 if persist_tx.send(command).await.is_err() {
@@ -325,11 +224,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(task) = scheduler.next_task().await {
                 let host = task.host.clone();
                 fetch_inflight.fetch_add(1, Ordering::SeqCst);
-                
+
                 let result = timeout(
                     PROCESS_ONE_TIMEOUT,
                     fetch::fetch_task(&db, &client, &robots_cache, &dns_ok_cache, task.clone()),
-                ).await;
+                )
+                .await;
 
                 match result {
                     Ok(Ok(payload)) => {
@@ -380,15 +280,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let processed = processed_pages.load(Ordering::SeqCst);
         let (pending_urls, inflight_hosts, tracked_hosts) = scheduler.stats().await;
-        
+
         if processed >= target_new_pages {
             scheduler.close().await;
             break;
         }
 
         if pending_urls == 0 && inflight_hosts == 0 && fetch_inflight.load(Ordering::SeqCst) == 0 {
-             scheduler.close().await;
-             break;
+            scheduler.close().await;
+            break;
         }
 
         if last_status.elapsed() >= Duration::from_secs(5) {
@@ -401,13 +301,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sleep(Duration::from_secs(1)).await;
     }
 
-    for h in fetch_handles { let _ = h.await; }
+    for h in fetch_handles {
+        let _ = h.await;
+    }
     drop(parse_tx);
-    for h in parse_handles { let _ = h.await; }
+    for h in parse_handles {
+        let _ = h.await;
+    }
     drop(persist_tx);
     let _ = writer_handle.await;
 
-    println!("[crawl] finished. total processed this run: {}", processed_pages.load(Ordering::SeqCst));
+    println!(
+        "[crawl] finished. total processed this run: {}",
+        processed_pages.load(Ordering::SeqCst)
+    );
     Ok(())
 }
 
@@ -429,7 +336,9 @@ async fn writer_loop(
             &per_domain_processed,
             &robots_cache,
             command,
-        ).await {
+        )
+        .await
+        {
             eprintln!("[crawl] persist error: {err}");
         } else if is_accept {
             processed_pages.fetch_add(1, Ordering::SeqCst);

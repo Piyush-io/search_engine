@@ -83,6 +83,18 @@ pub struct PathsConfig {
     pub index_path: String,
     pub lexical_index_path: String,
     pub wiki_index_path: String,
+    #[serde(default = "default_vector_delta_path")]
+    pub vector_delta_path: String,
+    #[serde(default = "default_seeds_path")]
+    pub seeds_path: String,
+}
+
+fn default_vector_delta_path() -> String {
+    "./hnsw_delta.bin".to_string()
+}
+
+fn default_seeds_path() -> String {
+    "./seeds.md".to_string()
 }
 
 pub fn load() -> Result<Config, Box<dyn std::error::Error>> {

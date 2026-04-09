@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use tantivy::{
-    Index, IndexReader,
+    Index, IndexReader, Term,
     collector::TopDocs,
     query::QueryParser,
     schema::{Field, STORED, STRING, Schema, TEXT, Value},
 };
 
-use crate::ChunkId;
+use crate::{Chunk, ChunkId};
 
 #[derive(Clone)]
 pub struct LexicalIndex {
@@ -118,24 +118,88 @@ impl LexicalIndex {
         )
     }
 
+    pub fn chunk_term(&self, chunk_id: &str) -> Term {
+        Term::from_field_text(self.chunk_id_field, chunk_id)
+    }
+
+    pub fn document_for_chunk(&self, chunk: &Chunk) -> Option<tantivy::TantivyDocument> {
+        if !chunk.is_leaf {
+            return None;
+        }
+
+        let mut doc = tantivy::doc!();
+        doc.add_text(self.chunk_id_field, &chunk.id);
+        if let Some(tf) = self.title_field {
+            if let Some(title) = chunk
+                .page_title
+                .as_deref()
+                .or_else(|| chunk.heading_chain.first().map(String::as_str))
+            {
+                doc.add_text(tf, title);
+            }
+        }
+        if let Some(sf) = self.section_field {
+            if let Some(section) = chunk.heading_chain.last() {
+                doc.add_text(sf, section);
+            }
+        }
+        doc.add_text(self.text_field, &chunk.text);
+        doc.add_text(self.heading_field, &chunk.heading_chain.join(" "));
+        doc.add_text(self.source_url_field, &chunk.source_url);
+        Some(doc)
+    }
+
+    fn escape_query_text(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for ch in text.chars() {
+            if matches!(
+                ch,
+                '+' | '-'
+                    | '&'
+                    | '|'
+                    | '!'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '^'
+                    | '"'
+                    | '~'
+                    | '*'
+                    | '?'
+                    | ':'
+                    | '\\'
+                    | '/'
+            ) {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out
+    }
+
     fn build_query(&self, query_text: &str) -> String {
         let trimmed = query_text.trim();
         if trimmed.is_empty() {
             return trimmed.to_string();
         }
 
-        let mut clauses = vec![format!("({trimmed})")];
+        let escaped = Self::escape_query_text(trimmed);
+
+        let mut clauses = vec![format!("({escaped})")];
         let word_count = trimmed.split_whitespace().count();
 
         if word_count <= 5 {
             if self.title_field.is_some() {
-                clauses.push(format!("title:\"{trimmed}\"^10"));
+                clauses.push(format!("title:\"{escaped}\"^10"));
             }
             if self.section_field.is_some() {
-                clauses.push(format!("section:\"{trimmed}\"^8"));
+                clauses.push(format!("section:\"{escaped}\"^8"));
             }
-            clauses.push(format!("heading:\"{trimmed}\"^6"));
-            clauses.push(format!("text:\"{trimmed}\"^3"));
+            clauses.push(format!("heading:\"{escaped}\"^6"));
+            clauses.push(format!("text:\"{escaped}\"^3"));
         }
 
         clauses.join(" OR ")
@@ -187,5 +251,16 @@ impl LexicalIndex {
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LexicalIndex;
+
+    #[test]
+    fn escapes_reserved_query_parser_characters() {
+        let escaped = LexicalIndex::escape_query_text("rust async? tokio::spawn");
+        assert_eq!(escaped, "rust async\\? tokio\\:\\:spawn");
     }
 }
