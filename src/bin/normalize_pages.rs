@@ -173,6 +173,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let chunks = build_chunks(&cfg, &page, &content_hash);
             let new_chunk_ids: HashSet<String> =
                 chunks.iter().map(|chunk| chunk.id.clone()).collect();
+            let preserved_last_fetch_ms = old_state
+                .as_ref()
+                .map(|state| state.last_fetch_ms)
+                .unwrap_or_default();
+            let preserved_etag = old_state.as_ref().and_then(|state| state.etag.clone());
+            let preserved_last_modified = old_state
+                .as_ref()
+                .and_then(|state| state.last_modified.clone());
 
             if let Some(state) = old_state {
                 for old_chunk_id in state.chunk_ids {
@@ -213,6 +221,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 content_hash,
                 chunk_ids: chunks.iter().map(|chunk| chunk.id.clone()).collect(),
                 last_crawled_ms: now_ms(),
+                last_fetch_ms: preserved_last_fetch_ms,
+                etag: preserved_etag,
+                last_modified: preserved_last_modified,
             };
             wb.put_cf(page_state_cf, url_bytes, serde_json::to_vec(&page_state)?);
             wb.delete_cf(norm_queue_cf, url_bytes);

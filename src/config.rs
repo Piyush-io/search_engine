@@ -16,6 +16,8 @@ pub struct CrawlConfig {
     pub max_pages: usize,
     pub concurrency: usize,
     pub rate_limit_ms: u64,
+    #[serde(default = "default_recrawl_days")]
+    pub recrawl_days: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,6 +48,9 @@ fn default_window_size() -> usize {
 }
 fn default_window_overlap() -> usize {
     1
+}
+fn default_recrawl_days() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]

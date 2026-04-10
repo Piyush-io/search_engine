@@ -8,6 +8,12 @@ pub struct PageState {
     pub chunk_ids: Vec<ChunkId>,
     #[serde(default)]
     pub last_crawled_ms: i64,
+    #[serde(default)]
+    pub last_fetch_ms: i64,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

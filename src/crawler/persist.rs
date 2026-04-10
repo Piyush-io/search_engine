@@ -1,6 +1,6 @@
 use crate::crawler::types::{ParsedPage, RejectReason, UrlTask};
 use crate::crawler::{canon, policy, robots, scheduler::CrawlScheduler};
-use crate::storage;
+use crate::{pipeline::PageState, storage};
 use dashmap::DashMap;
 use rocksdb::{DB, WriteBatch};
 use std::collections::HashSet;
@@ -16,6 +16,13 @@ pub enum PersistCommand {
         outlinks: Vec<String>,
         reason: RejectReason,
         depth: u16,
+    },
+    NotModified {
+        url: String,
+        host: String,
+        aliases: Vec<String>,
+        etag: Option<String>,
+        last_modified: Option<String>,
     },
     Accept {
         page: ParsedPage,
@@ -97,6 +104,7 @@ pub async fn persist_command(
     let domains_cf = storage::cf(db, storage::CF_DOMAINS)?;
     let content_cf = storage::cf(db, storage::CF_CONTENT)?;
     let norm_queue_cf = storage::cf(db, storage::CF_NORMALIZE_QUEUE)?;
+    let page_state_cf = storage::cf(db, storage::CF_PAGE_STATE)?;
 
     let mut wb = WriteBatch::default();
 
@@ -129,12 +137,34 @@ pub async fn persist_command(
                 scheduler.push_task(task).await;
             }
         }
+        PersistCommand::NotModified {
+            url,
+            host,
+            aliases,
+            etag,
+            last_modified,
+        } => {
+            for alias in aliases {
+                wb.put_cf(seen_cf, alias.as_bytes(), []);
+                wb.delete_cf(to_crawl_cf, alias.as_bytes());
+            }
+            wb.put_cf(domains_cf, host.as_bytes(), now_ms().to_string().as_bytes());
+            upsert_page_fetch_state(db, &mut wb, page_state_cf, &url, etag, last_modified)?;
+            db.write(wb)?;
+        }
         PersistCommand::Accept {
             page,
             aliases,
             depth,
         } => {
-            let host = Url::parse(&page.page_record.url)?
+            let ParsedPage {
+                page_record,
+                outlinks,
+                etag,
+                last_modified,
+                ..
+            } = page;
+            let host = Url::parse(&page_record.url)?
                 .host_str()
                 .unwrap_or_default()
                 .to_string();
@@ -145,20 +175,24 @@ pub async fn persist_command(
             }
             wb.put_cf(domains_cf, host.as_bytes(), now_ms().to_string().as_bytes());
 
-            let url_bytes = page.page_record.url.as_bytes();
-            wb.put_cf(
-                content_cf,
-                url_bytes,
-                serde_json::to_vec(&page.page_record)?,
-            );
+            let url_bytes = page_record.url.as_bytes();
+            wb.put_cf(content_cf, url_bytes, serde_json::to_vec(&page_record)?);
             wb.put_cf(norm_queue_cf, url_bytes, []);
+            upsert_page_fetch_state(
+                db,
+                &mut wb,
+                page_state_cf,
+                &page_record.url,
+                etag,
+                last_modified,
+            )?;
 
             *per_domain_processed.entry(host).or_insert(0) += 1;
 
             let tasks = enqueue_outlinks(
                 db,
                 &mut wb,
-                page.outlinks,
+                outlinks,
                 per_domain_processed,
                 robots_cache,
                 depth + 1,
@@ -171,6 +205,37 @@ pub async fn persist_command(
         }
     }
 
+    Ok(())
+}
+
+fn upsert_page_fetch_state(
+    db: &DB,
+    wb: &mut WriteBatch,
+    page_state_cf: rocksdb::ColumnFamilyRef<'_>,
+    url: &str,
+    etag: Option<String>,
+    last_modified: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = db
+        .get_cf(page_state_cf, url.as_bytes())?
+        .and_then(|bytes| serde_json::from_slice::<PageState>(&bytes).ok())
+        .unwrap_or(PageState {
+            content_hash: String::new(),
+            chunk_ids: Vec::new(),
+            last_crawled_ms: 0,
+            last_fetch_ms: 0,
+            etag: None,
+            last_modified: None,
+        });
+
+    let updated = PageState {
+        last_fetch_ms: now_ms(),
+        etag: etag.or(state.etag),
+        last_modified: last_modified.or(state.last_modified),
+        ..state
+    };
+
+    wb.put_cf(page_state_cf, url.as_bytes(), serde_json::to_vec(&updated)?);
     Ok(())
 }
 

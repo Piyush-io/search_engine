@@ -19,6 +19,7 @@ pub enum RejectReason {
     AlreadyStored,
     ParsePanic,
     BodyReadErr,
+    NotModified,
     RedirectBadUrl,
     RedirectNoHost,
     RedirectDisallowed,
@@ -43,6 +44,7 @@ impl RejectReason {
             Self::AlreadyStored => "already_stored",
             Self::ParsePanic => "parse_panic",
             Self::BodyReadErr => "body_read_err",
+            Self::NotModified => "not_modified",
             Self::RedirectBadUrl => "redirect_bad_url",
             Self::RedirectNoHost => "redirect_no_host",
             Self::RedirectDisallowed => "redirect_disallowed",
@@ -80,6 +82,9 @@ pub struct FetchResult {
     pub final_host: String,
     pub html: String,
     pub x_robots_noindex: bool,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub not_modified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,4 +106,6 @@ pub struct ParsedPage {
     pub outlinks: Vec<String>,
     pub noindex: bool,
     pub quality: PageQuality,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }

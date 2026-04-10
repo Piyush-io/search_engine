@@ -55,6 +55,8 @@ pub fn parse_result(result: FetchResult) -> Result<ParsedPage, RejectReason> {
             should_store: true,
             reject_reason: None,
         },
+        etag: result.etag,
+        last_modified: result.last_modified,
     })
 }
 

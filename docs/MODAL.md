@@ -75,14 +75,6 @@ Requires a built lexical/vector index in the data volume.
 modal run modal_app.py --action bench_query
 ```
 
-### 4a. Remote sample query
-
-Run one real query against the rebuilt remote indexes and print the top hits.
-
-```bash
-modal run modal_app.py --action sample_query --query-text "what is a B-tree" --top-k 5
-```
-
 ### 5. Remote ANN benchmark
 
 ```bash

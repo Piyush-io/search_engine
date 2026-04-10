@@ -1,11 +1,24 @@
 target/
 .fastembed_cache/
+crawl_data/
 lexical_index/
 hnsw_index.bin
 wiki_hnsw.bin
-crawl_data/
-agents.md
-*.log
-crawl_output.txt
 *.hnsw.data
 *.hnsw.graph
+
+# local backups / restores / runtime debris
+*.local_backup/
+migration_backup_*/
+modal_restore_tmp/
+__pycache__/
+.pytest_cache/
+.DS_Store
+
+# logs / reports
+*.log
+crawl_output.txt
+reports/benchmark_results.json
+
+# local notes
+agents.md

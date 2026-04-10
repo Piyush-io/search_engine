@@ -2,6 +2,7 @@
 max_pages = 2_000_000
 concurrency = 200
 rate_limit_ms = 100
+recrawl_days = 30
 
 [embedding]
 backend = "cuda"            # GTX 1660 SUPER — use CUDA EP directly

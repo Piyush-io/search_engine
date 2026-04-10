@@ -23,6 +23,77 @@ pub fn domain_rate_limit_ms(default_ms: u64, host: &str) -> u64 {
     }
 }
 
+pub fn recrawl_days_for_host(default_days: u64, host: &str) -> u64 {
+    if host_matches_rule(host, "developer.mozilla.org")
+        || host_matches_rule(host, "docs.python.org")
+        || host_matches_rule(host, "doc.rust-lang.org")
+        || host_matches_rule(host, "docs.rs")
+        || host_matches_rule(host, "go.dev")
+        || host_matches_rule(host, "pkg.go.dev")
+        || host_matches_rule(host, "kubernetes.io")
+        || host_matches_rule(host, "learn.microsoft.com")
+        || host_matches_rule(host, "docs.oracle.com")
+        || host_matches_rule(host, "docs.aws.amazon.com")
+        || host_matches_rule(host, "docs.docker.com")
+        || host_matches_rule(host, "docs.ansible.com")
+        || host_matches_rule(host, "prometheus.io")
+        || host_matches_rule(host, "opentelemetry.io")
+        || host_matches_rule(host, "www.kernel.org")
+        || host_matches_rule(host, "docs.kernel.org")
+        || host_matches_rule(host, "llvm.org")
+        || host_matches_rule(host, "clang.llvm.org")
+        || host_matches_rule(host, "gcc.gnu.org")
+    {
+        default_days.clamp(7, 30)
+    } else if host_matches_rule(host, "blog.cloudflare.com")
+        || host_matches_rule(host, "martinfowler.com")
+        || host_matches_rule(host, "blog.acolyer.org")
+        || host_matches_rule(host, "eng.uber.com")
+        || host_matches_rule(host, "netflixtechblog.com")
+        || host_matches_rule(host, "research.google")
+        || host_matches_rule(host, "blog.rust-lang.org")
+        || host_matches_rule(host, "simonwillison.net")
+        || host_matches_rule(host, "danluu.com")
+        || host_matches_rule(host, "rachelbythebay.com")
+        || host_matches_rule(host, "slack.engineering")
+        || host_matches_rule(host, "dropbox.tech")
+        || host_matches_rule(host, "shopify.engineering")
+        || host_matches_rule(host, "grafana.com")
+        || host_matches_rule(host, "www.elastic.co")
+        || host_matches_rule(host, "fly.io")
+        || host_matches_rule(host, "www.cockroachlabs.com")
+        || host_matches_rule(host, "jepsen.io")
+        || host_matches_rule(host, "martin.kleppmann.com")
+        || host_matches_rule(host, "muratbuffalo.blogspot.com")
+        || host_matches_rule(host, "thume.ca")
+        || host_matches_rule(host, "interrupt.memfault.com")
+        || host_matches_rule(host, "blog.cryptographyengineering.com")
+    {
+        default_days.clamp(30, 90)
+    } else if host_matches_rule(host, "pages.cs.wisc.edu")
+        || host_matches_rule(host, "pdos.csail.mit.edu")
+        || host_matches_rule(host, "www.cs.princeton.edu")
+        || host_matches_rule(host, "www.cs.cornell.edu")
+        || host_matches_rule(host, "15445.courses.cs.cmu.edu")
+        || host_matches_rule(host, "15721.courses.cs.cmu.edu")
+        || host_matches_rule(host, "softwarefoundations.cis.upenn.edu")
+        || host_matches_rule(host, "homotopytypetheory.org")
+        || host_matches_rule(host, "lamport.azurewebsites.net")
+        || host_matches_rule(host, "coq.inria.fr")
+        || host_matches_rule(host, "www.cl.cam.ac.uk")
+        || host_matches_rule(host, "book.rvemu.app")
+        || host_matches_rule(host, "craftinginterpreters.com")
+        || host_matches_rule(host, "raytracing.github.io")
+        || host_matches_rule(host, "quantum.country")
+        || host_matches_rule(host, "learn.qiskit.org")
+        || host_matches_rule(host, "missing.csail.mit.edu")
+    {
+        default_days.max(90)
+    } else {
+        default_days
+    }
+}
+
 pub fn wiki_topic_allowed(title: &str) -> bool {
     const TOPIC_MARKERS: &[&str] = &[
         "computer",

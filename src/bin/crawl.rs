@@ -46,10 +46,25 @@ fn load_seed_urls(path: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>
     }
 
     if out.is_empty() {
-        return Err(format!("no https seed URLs found in {}", path).into());
+        return Err(format!(
+            "no https seed URLs found in {}. Check that the seed file exists and contains at least one https:// URL.",
+            path
+        )
+        .into());
     }
 
     Ok(out)
+}
+
+fn unique_aliases(urls: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for url in urls {
+        if !url.is_empty() && seen.insert(url.clone()) {
+            out.push(url);
+        }
+    }
+    out
 }
 
 #[tokio::main]
@@ -82,14 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         existing_pages, cfg.crawl.max_pages
     );
 
-    if existing_pages >= cfg.crawl.max_pages {
-        println!(
-            "[crawl] target already reached ({} >= {}), nothing to do",
-            existing_pages, cfg.crawl.max_pages
-        );
-        return Ok(());
-    }
-
     let scheduler = Arc::new(CrawlScheduler::new(cfg.crawl.rate_limit_ms));
     let robots_cache = robots::new_cache();
     let (frontier_loaded, frontier_purged) = recover::load_frontier_into_scheduler(
@@ -119,6 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         seeded
     );
 
+    let recrawl_after_ms = (cfg.crawl.recrawl_days as i64) * 24 * 60 * 60 * 1000;
+    let recrawl_seeded = recover::enqueue_due_recrawls(&db, &scheduler, recrawl_after_ms).await?;
+    println!("[crawl] enqueued {} due recrawls", recrawl_seeded);
+
     let client = Arc::new(
         Client::builder()
             .connect_timeout(Duration::from_secs(3))
@@ -139,6 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let dns_ok_cache: Arc<DashMap<String, bool>> = Arc::new(DashMap::new());
     let processed_pages = Arc::new(AtomicUsize::new(0));
+    let new_pages_accepted = Arc::new(AtomicUsize::new(0));
     let fetch_inflight = Arc::new(AtomicUsize::new(0));
     let persist_pending = Arc::new(AtomicUsize::new(0));
 
@@ -148,8 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&per_domain_processed),
         Arc::clone(&robots_cache),
         Arc::clone(&processed_pages),
+        Arc::clone(&new_pages_accepted),
         Arc::clone(&persist_pending),
-        existing_pages,
         persist_rx,
     ));
 
@@ -171,10 +183,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let depth = payload.task.depth;
-                let command =
+                let task_url = payload.task.url.clone();
+                let task_host = payload.task.host.clone();
+                let final_url = payload.final_url.clone();
+                let final_host = payload.final_host.clone();
+                let etag = payload.etag.clone();
+                let last_modified = payload.last_modified.clone();
+
+                let reject_host = if final_host.is_empty() {
+                    task_host.clone()
+                } else {
+                    final_host.clone()
+                };
+
+                let command = if payload.not_modified {
+                    PersistCommand::NotModified {
+                        url: task_url.clone(),
+                        host: task_host.clone(),
+                        aliases: unique_aliases(vec![task_url.clone(), final_url.clone()]),
+                        etag,
+                        last_modified,
+                    }
+                } else {
                     match tokio::task::spawn_blocking(move || parse::parse_result(payload)).await {
                         Ok(Ok(page)) => {
-                            let aliases = vec![page.page_record.url.clone()];
+                            let aliases = unique_aliases(vec![
+                                task_url.clone(),
+                                final_url.clone(),
+                                page.final_url.clone(),
+                                page.canonical_url.clone(),
+                                page.page_record.url.clone(),
+                            ]);
                             PersistCommand::Accept {
                                 page,
                                 aliases,
@@ -182,22 +221,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Ok(Err(reason)) => PersistCommand::Reject {
-                            url: String::new(),
-                            host: String::new(),
-                            aliases: Vec::new(),
+                            url: task_url.clone(),
+                            host: reject_host.clone(),
+                            aliases: unique_aliases(vec![task_url.clone(), final_url.clone()]),
                             outlinks: Vec::new(),
                             reason,
                             depth,
                         },
                         Err(_) => PersistCommand::Reject {
-                            url: String::new(),
-                            host: String::new(),
-                            aliases: Vec::new(),
+                            url: task_url.clone(),
+                            host: reject_host.clone(),
+                            aliases: unique_aliases(vec![task_url.clone(), final_url.clone()]),
                             outlinks: Vec::new(),
                             reason: RejectReason::ParsePanic,
                             depth,
                         },
-                    };
+                    }
+                };
 
                 persist_pending.fetch_add(1, Ordering::SeqCst);
                 if persist_tx.send(command).await.is_err() {
@@ -279,22 +319,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_status = Instant::now();
     loop {
         let processed = processed_pages.load(Ordering::SeqCst);
+        let accepted_new_pages = new_pages_accepted.load(Ordering::SeqCst);
         let (pending_urls, inflight_hosts, tracked_hosts) = scheduler.stats().await;
-
-        if processed >= target_new_pages {
-            scheduler.close().await;
-            break;
-        }
 
         if pending_urls == 0 && inflight_hosts == 0 && fetch_inflight.load(Ordering::SeqCst) == 0 {
             scheduler.close().await;
             break;
         }
 
+        if target_new_pages > 0 && accepted_new_pages >= target_new_pages {
+            scheduler.close().await;
+            break;
+        }
+
         if last_status.elapsed() >= Duration::from_secs(5) {
             println!(
-                "[crawl] status pending_urls={} inflight_hosts={} tracked_hosts={} processed={}",
-                pending_urls, inflight_hosts, tracked_hosts, processed
+                "[crawl] status pending_urls={} inflight_hosts={} tracked_hosts={} processed={} new_pages_accepted={} target_new_pages={} fetch_inflight={} persist_pending={}",
+                pending_urls,
+                inflight_hosts,
+                tracked_hosts,
+                processed,
+                accepted_new_pages,
+                target_new_pages,
+                fetch_inflight.load(Ordering::SeqCst),
+                persist_pending.load(Ordering::SeqCst)
             );
             last_status = Instant::now();
         }
@@ -324,11 +372,22 @@ async fn writer_loop(
     per_domain_processed: Arc<DashMap<String, usize>>,
     robots_cache: robots::RobotsCache,
     processed_pages: Arc<AtomicUsize>,
+    new_pages_accepted: Arc<AtomicUsize>,
     persist_pending: Arc<AtomicUsize>,
-    _existing_pages: usize,
     mut persist_rx: mpsc::Receiver<PersistCommand>,
 ) {
     while let Some(command) = persist_rx.recv().await {
+        let accepted_existing = match &command {
+            PersistCommand::Accept { page, .. } => db
+                .get_cf(
+                    storage::cf(&db, storage::CF_CONTENT).expect("content cf"),
+                    page.page_record.url.as_bytes(),
+                )
+                .ok()
+                .flatten()
+                .is_some(),
+            _ => false,
+        };
         let is_accept = matches!(command, PersistCommand::Accept { .. });
         if let Err(err) = persist::persist_command(
             &db,
@@ -342,6 +401,9 @@ async fn writer_loop(
             eprintln!("[crawl] persist error: {err}");
         } else if is_accept {
             processed_pages.fetch_add(1, Ordering::SeqCst);
+            if !accepted_existing {
+                new_pages_accepted.fetch_add(1, Ordering::SeqCst);
+            }
         }
         persist_pending.fetch_sub(1, Ordering::SeqCst);
     }
