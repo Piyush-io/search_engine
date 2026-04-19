@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod bruteforce;
 pub mod composite;
 pub mod hnsw;

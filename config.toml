@@ -26,6 +26,8 @@ context_depth = 3
 window_size = 3
 window_overlap = 1
 
+[ranking]
+
 [rocksdb]
 block_cache_mb = 256
 

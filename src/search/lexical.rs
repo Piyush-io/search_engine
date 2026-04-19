@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use tantivy::{
-    Index, IndexReader, Term,
     collector::TopDocs,
     query::QueryParser,
-    schema::{Field, STORED, STRING, Schema, TEXT, Value},
+    schema::{Field, Schema, Value, STORED, STRING, TEXT},
+    Index, IndexReader, Term,
 };
 
 use crate::{Chunk, ChunkId};

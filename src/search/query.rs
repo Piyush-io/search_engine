@@ -4,10 +4,10 @@ use rocksdb::DB;
 use url::Url;
 
 use crate::{
-    Chunk, SearchResult,
+    config::RankingConfig,
     embeddings::client,
     search::{lexical::LexicalIndex, vector_index::VectorIndex},
-    storage,
+    storage, Chunk, ChunkId, ScoredHit,
 };
 
 const SYNONYMS: &[(&[&str], &[&str])] = &[
@@ -68,14 +68,22 @@ fn build_expanded_query_text(original: &str, tokens: &HashSet<String>) -> String
 }
 
 struct Candidate {
-    result: SearchResult,
-    body_overlap: f32,
-    heading_overlap: f32,
+    chunk_id: ChunkId,
+    text: String,
+    source_url: String,
+    heading_chain: Vec<String>,
+    final_score: f32,
+    vector_score: f32,
+    lexical_score: f32,
     title_overlap: f32,
-    heading_match_count: usize,
-    query_token_count: usize,
+    heading_overlap: f32,
+    body_overlap: f32,
+    authority_bonus_val: f32,
     exact_heading_phrase: bool,
     exact_body_phrase: bool,
+    heading_match_count: usize,
+    overall_match_count: usize,
+    query_token_count: usize,
 }
 
 pub fn run_query(
@@ -84,7 +92,8 @@ pub fn run_query(
     lexical: Option<&LexicalIndex>,
     query_text: &str,
     k: usize,
-) -> Vec<SearchResult> {
+    ranking: &RankingConfig,
+) -> Vec<ScoredHit> {
     let query_vec = match client::embed_query(query_text) {
         Ok(v) => v,
         Err(e) => {
@@ -107,7 +116,7 @@ pub fn run_query(
         .and_then(|lx| lx.search(&expanded_query, lex_pool_k).ok())
         .unwrap_or_default();
 
-    let fused_ids = rrf_fuse_ids(&vector_hits, &lexical_hits, 2_000, short_query);
+    let fused_ids = rrf_fuse_ids(&vector_hits, &lexical_hits, 2_000, short_query, ranking);
     let vec_scores = normalize_scores(&vector_hits);
     let lex_scores = normalize_scores(&lexical_hits);
 
@@ -137,6 +146,10 @@ pub fn run_query(
                 let heading_text = specific_heading_text(&chunk.heading_chain);
                 let heading_overlap = token_overlap(&query_tokens, &heading_text);
                 let heading_match_count = token_match_count(&query_tokens, &heading_text);
+                let overall_match_count = combined_token_match_count(
+                    &query_tokens,
+                    &[page_title, &heading_text, &chunk.text],
+                );
                 let vec_score = *vec_scores.get(&chunk.id).unwrap_or(&0.0);
                 let lex_score = *lex_scores.get(&chunk.id).unwrap_or(&0.0);
                 let exact_heading_phrase = contains_phrase(&query_phrase, page_title)
@@ -144,70 +157,71 @@ pub fn run_query(
                     || contains_phrase(&query_phrase, &heading_text);
                 let exact_body_phrase = contains_phrase(&query_phrase, &chunk.text);
 
-                // Short queries (≤5 tokens) emphasize lexical and title signals over vector.
-                // Long queries balance vector and lexical more equally.
                 let mut rerank_score = if short_query {
-                    (0.25 * vec_score)
-                        + (0.35 * lex_score)
-                        + (0.22 * title_overlap)
-                        + (0.12 * heading_overlap)
-                        + (0.06 * body_overlap)
+                    (ranking.short_vec_weight * vec_score)
+                        + (ranking.short_lex_weight * lex_score)
+                        + (ranking.short_title_weight * title_overlap)
+                        + (ranking.short_heading_weight * heading_overlap)
+                        + (ranking.short_body_weight * body_overlap)
                 } else {
-                    (0.35 * vec_score)
-                        + (0.20 * lex_score)
-                        + (0.20 * title_overlap)
-                        + (0.15 * heading_overlap)
-                        + (0.10 * body_overlap)
+                    (ranking.long_vec_weight * vec_score)
+                        + (ranking.long_lex_weight * lex_score)
+                        + (ranking.long_title_weight * title_overlap)
+                        + (ranking.long_heading_weight * heading_overlap)
+                        + (ranking.long_body_weight * body_overlap)
                 };
 
                 if exact_heading_phrase {
-                    rerank_score += 0.25;
+                    rerank_score += ranking.exact_heading_boost;
                 } else if exact_body_phrase {
-                    rerank_score += 0.10;
+                    rerank_score += ranking.exact_body_boost;
                 }
 
                 if short_query && title_overlap == 0.0 && heading_overlap == 0.0 {
-                    rerank_score *= 0.55;
+                    rerank_score *= ranking.no_heading_penalty;
                 } else if short_query && title_overlap == 0.0 && heading_overlap < 0.34 {
-                    rerank_score *= 0.78;
+                    rerank_score *= ranking.weak_heading_penalty;
                 }
 
-                // Boost results from canonical authority domains for the queried tech
-                if let Some(host) = url_host(&chunk.source_url) {
-                    rerank_score += domain_authority_bonus(&query_tokens, &host);
-                }
+                let auth_bonus = if let Some(host) = url_host(&chunk.source_url) {
+                    domain_authority_bonus(&query_tokens, &host, ranking.authority_bonus)
+                } else {
+                    0.0
+                };
+                rerank_score += auth_bonus;
 
                 candidates.push(Candidate {
-                    result: SearchResult {
-                        chunk_id: chunk.id,
-                        score: rerank_score,
-                        text: chunk.text,
-                        source_url: chunk.source_url,
-                        heading_chain: chunk.heading_chain,
-                    },
-                    body_overlap,
-                    heading_overlap,
+                    chunk_id: chunk.id,
+                    text: chunk.text,
+                    source_url: chunk.source_url,
+                    heading_chain: chunk.heading_chain,
+                    final_score: rerank_score,
+                    vector_score: vec_score,
+                    lexical_score: lex_score,
                     title_overlap,
-                    heading_match_count,
-                    query_token_count: query_tokens.len(),
+                    heading_overlap,
+                    body_overlap,
+                    authority_bonus_val: auth_bonus,
                     exact_heading_phrase,
                     exact_body_phrase,
+                    heading_match_count,
+                    overall_match_count,
+                    query_token_count: query_tokens.len(),
                 });
             }
         }
     }
 
-    candidates.sort_by(|a, b| b.result.score.total_cmp(&a.result.score));
+    candidates.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
 
-    // Score floor: drop candidates below a minimum quality threshold.
     let score_floor = if let Some(top) = candidates.first() {
-        (top.result.score * 0.15).max(0.12)
+        (top.final_score * 0.15).max(0.12)
     } else {
         0.12
     };
-    candidates.retain(|c| c.result.score >= score_floor);
+    candidates.retain(|c| c.final_score >= score_floor);
 
-    let mut selected = Vec::new();
+    let mut selected: Vec<ScoredHit> = Vec::new();
     let mut seen_url_keys = HashSet::new();
     let mut seen_text_tokens = Vec::new();
     let mut per_host: HashMap<String, usize> = HashMap::new();
@@ -249,14 +263,13 @@ fn rrf_fuse_ids(
     lexical_hits: &[(String, f32)],
     limit: usize,
     short_query: bool,
+    ranking: &RankingConfig,
 ) -> Vec<String> {
     let mut scores: HashMap<String, f32> = HashMap::new();
-    let k = 60.0_f32;
+    let k = ranking.rrf_k;
 
-    // Short queries: trust lexical signal more (navigational intent).
-    // Long queries: trust vector signal more (semantic intent).
     let (vec_weight, lex_weight) = if short_query {
-        (0.6_f32, 1.8_f32)
+        (ranking.short_rrf_vec_weight, ranking.short_rrf_lex_weight)
     } else {
         (1.0_f32, 1.0_f32)
     };
@@ -303,7 +316,7 @@ fn normalize_scores(hits: &[(String, f32)]) -> HashMap<String, f32> {
 }
 
 fn fill_results<'a>(
-    selected: &mut Vec<SearchResult>,
+    selected: &mut Vec<ScoredHit>,
     seen_url_keys: &mut HashSet<String>,
     seen_text_tokens: &mut Vec<HashSet<String>>,
     per_host: &mut HashMap<String, usize>,
@@ -319,6 +332,7 @@ fn fill_results<'a>(
             break;
         }
         let structural_signal = c.heading_overlap.max(c.title_overlap);
+        let enough_total_matches = c.overall_match_count >= 2;
         if short_query {
             let enough_heading_matches = c.heading_match_count >= 2
                 || (c.query_token_count <= 2 && c.heading_match_count >= 1);
@@ -326,12 +340,15 @@ fn fill_results<'a>(
                 if structural_signal < min_overlap && !c.exact_heading_phrase {
                     continue;
                 }
-                if !c.exact_heading_phrase && !enough_heading_matches {
+                if !c.exact_heading_phrase && !enough_heading_matches && !enough_total_matches {
                     continue;
                 }
             } else {
                 let lexical_signal = c.body_overlap.max(structural_signal);
                 if lexical_signal < min_overlap && !c.exact_heading_phrase && !c.exact_body_phrase {
+                    continue;
+                }
+                if !c.exact_heading_phrase && !c.exact_body_phrase && !enough_total_matches {
                     continue;
                 }
             }
@@ -342,13 +359,12 @@ fn fill_results<'a>(
             }
         }
 
-        let r = &c.result;
-        let url_key = canonical_url_key(&r.source_url);
+        let url_key = canonical_url_key(&c.source_url);
         if seen_url_keys.contains(&url_key) {
             continue;
         }
 
-        let tokens = tokenize_set(&r.text);
+        let tokens = tokenize_set(&c.text);
         if tokens.is_empty() {
             continue;
         }
@@ -363,17 +379,31 @@ fn fill_results<'a>(
             continue;
         }
 
-        if let Some(host) = url_host(&r.source_url) {
-            let c = per_host.entry(host).or_insert(0);
-            if *c >= host_cap {
+        if let Some(host) = url_host(&c.source_url) {
+            let cnt = per_host.entry(host).or_insert(0);
+            if *cnt >= host_cap {
                 continue;
             }
-            *c += 1;
+            *cnt += 1;
         }
 
         seen_url_keys.insert(url_key);
         seen_text_tokens.push(tokens);
-        selected.push(r.clone());
+        selected.push(ScoredHit {
+            chunk_id: c.chunk_id.clone(),
+            text: c.text.clone(),
+            source_url: c.source_url.clone(),
+            heading_chain: c.heading_chain.clone(),
+            vector_score: c.vector_score,
+            lexical_score: c.lexical_score,
+            title_overlap: c.title_overlap,
+            heading_overlap: c.heading_overlap,
+            body_overlap: c.body_overlap,
+            authority_bonus: c.authority_bonus_val,
+            exact_heading_phrase: c.exact_heading_phrase,
+            exact_body_phrase: c.exact_body_phrase,
+            final_score: c.final_score,
+        });
     }
 }
 
@@ -404,6 +434,22 @@ fn token_match_count(query_tokens: &HashSet<String>, text: &str) -> usize {
     query_tokens.iter().filter(|t| tokens.contains(*t)).count()
 }
 
+fn combined_token_match_count(query_tokens: &HashSet<String>, texts: &[&str]) -> usize {
+    if query_tokens.is_empty() {
+        return 0;
+    }
+
+    let mut combined_tokens = HashSet::new();
+    for text in texts {
+        combined_tokens.extend(tokenize_set(text));
+    }
+
+    query_tokens
+        .iter()
+        .filter(|token| combined_tokens.contains(*token))
+        .count()
+}
+
 fn tokenize_set(text: &str) -> HashSet<String> {
     const STOP: &[&str] = &[
         "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "is", "are", "be",
@@ -414,22 +460,43 @@ fn tokenize_set(text: &str) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut cur = String::new();
 
+    for raw_piece in text.split_whitespace() {
+        let compact = compact_token(raw_piece);
+        maybe_insert_token(&mut out, &stop, compact);
+    }
+
     for ch in text.chars() {
         if ch.is_ascii_alphanumeric() || ch == '+' {
             cur.push(ch.to_ascii_lowercase());
         } else if !cur.is_empty() {
-            if cur.len() >= 2 && !stop.contains(cur.as_str()) {
-                out.insert(cur.clone());
-            }
+            maybe_insert_token(&mut out, &stop, std::mem::take(&mut cur));
             cur.clear();
         }
     }
 
-    if !cur.is_empty() && cur.len() >= 2 && !stop.contains(cur.as_str()) {
-        out.insert(cur);
+    if !cur.is_empty() {
+        maybe_insert_token(&mut out, &stop, cur);
+    }
+
+    let normalized = normalize_phrase(text);
+    if normalized.contains("b tree") || text.to_ascii_lowercase().contains("btree") {
+        out.insert("btree".to_string());
     }
 
     out
+}
+
+fn compact_token(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn maybe_insert_token(tokens: &mut HashSet<String>, stop: &HashSet<&str>, token: String) {
+    if token.len() >= 2 && !stop.contains(token.as_str()) {
+        tokens.insert(token);
+    }
 }
 
 fn normalize_phrase(text: &str) -> String {
@@ -454,13 +521,18 @@ fn contains_phrase(query_phrase: &str, text: &str) -> bool {
     normalize_phrase(text).contains(query_phrase)
 }
 
+fn canonical_host(host: &str) -> String {
+    let host = host.to_ascii_lowercase();
+    if matches!(host.as_str(), "doc.rust-lang.org" | "docs.rust-lang.org") {
+        return "doc.rust-lang.org".to_string();
+    }
+    host.strip_prefix("www.").unwrap_or(host.as_str()).to_string()
+}
+
 fn canonical_url_key(url: &str) -> String {
     if let Ok(mut u) = Url::parse(url) {
-        let host = u.host_str().map(|h| h.to_ascii_lowercase());
-        if matches!(
-            host.as_deref(),
-            Some("doc.rust-lang.org") | Some("docs.rust-lang.org")
-        ) {
+        let host = u.host_str().map(canonical_host);
+        if matches!(host.as_deref(), Some("doc.rust-lang.org")) {
             let path = u.path().trim_start_matches('/');
             let stripped = path
                 .strip_prefix("beta/")
@@ -468,6 +540,10 @@ fn canonical_url_key(url: &str) -> String {
                 .or_else(|| path.strip_prefix("nightly/"))
                 .unwrap_or(path);
             return format!("doc.rust-lang.org/{}", stripped);
+        }
+
+        if let Some(host) = host.as_deref() {
+            let _ = u.set_host(Some(host));
         }
         u.set_query(None);
         u.set_fragment(None);
@@ -490,7 +566,7 @@ fn url_host(url: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
-fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str) -> f32 {
+fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str, bonus: f32) -> f32 {
     const AUTHORITY: &[(&str, &[&str])] = &[
         ("rust", &["doc.rust-lang.org", "docs.rust-lang.org"]),
         ("python", &["docs.python.org"]),
@@ -515,9 +591,48 @@ fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str) -> f32 {
                 .iter()
                 .any(|h| host == *h || host.ends_with(&format!(".{h}")))
             {
-                return 0.08;
+                return bonus;
             }
         }
     }
     0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonical_url_key, tokenize_set};
+
+    #[test]
+    fn tokenize_set_preserves_compound_technical_terms() {
+        let tokens = tokenize_set("what is a B-tree and a three-way handshake?");
+
+        assert!(tokens.contains("btree"));
+        assert!(tokens.contains("threeway"));
+        assert!(tokens.contains("handshake"));
+        assert!(!tokens.contains("what"));
+    }
+
+    #[test]
+    fn tokenize_set_canonicalizes_btree_variants() {
+        assert!(tokenize_set("B-tree").contains("btree"));
+        assert!(tokenize_set("B+tree").contains("btree"));
+        assert!(tokenize_set("B tree").contains("btree"));
+        assert!(tokenize_set("btree").contains("btree"));
+    }
+
+    #[test]
+    fn canonical_url_key_dedupes_www_aliases() {
+        assert_eq!(
+            canonical_url_key("https://sqlite.org/c3ref/wal_checkpoint.html"),
+            canonical_url_key("https://www.sqlite.org/c3ref/wal_checkpoint.html?view=all#top"),
+        );
+    }
+
+    #[test]
+    fn canonical_url_key_dedupes_rust_doc_channels() {
+        assert_eq!(
+            canonical_url_key("https://doc.rust-lang.org/stable/reference/lifetime-elision.html"),
+            canonical_url_key("https://docs.rust-lang.org/nightly/reference/lifetime-elision.html"),
+        );
+    }
 }

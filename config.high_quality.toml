@@ -1,0 +1,43 @@
+[crawl]
+max_pages = 150_000
+concurrency = 96
+rate_limit_ms = 125
+recrawl_days = 30
+
+[embedding]
+backend = "cuda"
+model = "bge-small-en-v1.5"
+dim = 384
+batch_size = 64
+max_length = 128
+bulk_workers = 1
+bulk_intra_threads = 2
+
+[hnsw]
+backend = "hnsw"
+shards = 1
+m = 8
+ef_construction = 80
+ef_search = 120
+max_elements = 5_000_000
+
+[chunking]
+context_depth = 3
+window_size = 3
+window_overlap = 1
+
+[ranking]
+
+[rocksdb]
+block_cache_mb = 256
+
+[server]
+port = 3000
+
+[paths]
+db_path = "./crawl_data.high_quality"
+index_path = "./hnsw_index.high_quality.bin"
+lexical_index_path = "./lexical_index.high_quality"
+wiki_index_path = "./wiki_hnsw.high_quality.bin"
+vector_delta_path = "./hnsw_delta.high_quality.bin"
+seeds_path = "./seeds.high_quality.md"

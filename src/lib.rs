@@ -2,6 +2,7 @@ pub mod chunking;
 pub mod config;
 pub mod crawler;
 pub mod embeddings;
+pub mod eval;
 pub mod extraction;
 pub mod knowledge;
 pub mod pipeline;
@@ -59,4 +60,33 @@ pub struct SearchResult {
     pub text: String,
     pub source_url: String,
     pub heading_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScoredHit {
+    pub chunk_id: ChunkId,
+    pub text: String,
+    pub source_url: String,
+    pub heading_chain: Vec<String>,
+    pub vector_score: f32,
+    pub lexical_score: f32,
+    pub title_overlap: f32,
+    pub heading_overlap: f32,
+    pub body_overlap: f32,
+    pub authority_bonus: f32,
+    pub exact_heading_phrase: bool,
+    pub exact_body_phrase: bool,
+    pub final_score: f32,
+}
+
+impl ScoredHit {
+    pub fn to_search_result(&self) -> SearchResult {
+        SearchResult {
+            chunk_id: self.chunk_id.clone(),
+            score: self.final_score,
+            text: self.text.clone(),
+            source_url: self.source_url.clone(),
+            heading_chain: self.heading_chain.clone(),
+        }
+    }
 }

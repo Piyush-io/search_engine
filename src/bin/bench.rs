@@ -34,7 +34,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for q in SAMPLE_QUERIES {
         let t0 = Instant::now();
-        let hits = query::run_query(&db, boxed_index.as_ref(), lexical.as_ref(), q, 10);
+        let hits = query::run_query(
+            &db,
+            boxed_index.as_ref(),
+            lexical.as_ref(),
+            q,
+            10,
+            &cfg.ranking,
+        );
         let ms = t0.elapsed().as_millis();
         records.push(serde_json::json!({
             "query": q,

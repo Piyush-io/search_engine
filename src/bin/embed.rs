@@ -3,10 +3,10 @@ use std::{sync::mpsc, time::Instant};
 use bytemuck::cast_slice;
 use rocksdb::{DBRawIteratorWithThreadMode, IteratorMode, ReadOptions, WriteBatch, WriteOptions};
 use search_engine::{
-    Chunk, config,
+    config,
     embeddings::{bulk, client},
     pipeline::IndexOperation,
-    storage,
+    storage, Chunk,
 };
 use tracing::{debug, info};
 
@@ -225,27 +225,25 @@ fn run_full_scan(
     for worker in workers {
         let rx = Arc::clone(&shared_rx);
         let tx = done_tx.clone();
-        let handle = std::thread::spawn(move || {
-            loop {
-                let item = {
-                    let guard = rx.lock().expect("work queue mutex poisoned");
-                    guard.recv()
-                };
-                match item {
-                    Err(_) => break,
-                    Ok(WorkItem { ids, texts }) => {
-                        let t_embed = Instant::now();
-                        match worker.embed_batch(&texts) {
-                            Err(err) => {
-                                tracing::error!(error = %err, batch = texts.len(), "embed_batch failed");
-                            }
-                            Ok(vectors) => {
-                                let _ = tx.send(DoneItem {
-                                    ids,
-                                    vectors,
-                                    embed_dur: t_embed.elapsed(),
-                                });
-                            }
+        let handle = std::thread::spawn(move || loop {
+            let item = {
+                let guard = rx.lock().expect("work queue mutex poisoned");
+                guard.recv()
+            };
+            match item {
+                Err(_) => break,
+                Ok(WorkItem { ids, texts }) => {
+                    let t_embed = Instant::now();
+                    match worker.embed_batch(&texts) {
+                        Err(err) => {
+                            tracing::error!(error = %err, batch = texts.len(), "embed_batch failed");
+                        }
+                        Ok(vectors) => {
+                            let _ = tx.send(DoneItem {
+                                ids,
+                                vectors,
+                                embed_dur: t_embed.elapsed(),
+                            });
                         }
                     }
                 }
@@ -404,6 +402,49 @@ fn run_full_scan(
         wall_secs = format_args!("{:.1}", loop_dur.as_secs_f64()),
         "time breakdown"
     );
+
+    let embed_queue_cf = storage::cf(&db, storage::CF_EMBED_QUEUE)?;
+    let vector_queue_cf = storage::cf(&db, storage::CF_VECTOR_QUEUE)?;
+    let lexical_queue_cf = storage::cf(&db, storage::CF_LEXICAL_QUEUE)?;
+
+    let mut queued = 0usize;
+    let mut skipped_non_leaf = 0usize;
+
+    loop {
+        let mut batch_keys = Vec::new();
+        for item in db
+            .iterator_cf(&embed_queue_cf, IteratorMode::Start)
+            .take(50_000)
+        {
+            let (key, _) = item?;
+            batch_keys.push(key.to_vec());
+        }
+
+        if batch_keys.is_empty() {
+            break;
+        }
+
+        let mut wb = WriteBatch::default();
+        for key in &batch_keys {
+            if db.get_cf(&embeddings_cf, key)?.is_some() {
+                wb.put_cf(&vector_queue_cf, key, IndexOperation::Upsert.as_bytes());
+                wb.delete_cf(&embed_queue_cf, key);
+                queued += 1;
+            } else {
+                wb.delete_cf(&embed_queue_cf, key);
+                wb.delete_cf(&lexical_queue_cf, key);
+                skipped_non_leaf += 1;
+            }
+        }
+
+        db.write_opt(wb, &write_opts)?;
+    }
+
+    info!(
+        "[embed] drained embed_queue: queued={} skipped_non_leaf={}",
+        queued, skipped_non_leaf
+    );
+
     Ok(())
 }
 

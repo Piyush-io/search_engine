@@ -6,6 +6,7 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
     pub hnsw: HnswConfig,
     pub chunking: ChunkingConfig,
+    pub ranking: RankingConfig,
     pub rocksdb: RocksDbConfig,
     pub server: ServerConfig,
     pub paths: PathsConfig,
@@ -51,6 +52,101 @@ fn default_window_overlap() -> usize {
 }
 fn default_recrawl_days() -> u64 {
     30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RankingConfig {
+    #[serde(default = "default_short_vec_weight")]
+    pub short_vec_weight: f32,
+    #[serde(default = "default_short_lex_weight")]
+    pub short_lex_weight: f32,
+    #[serde(default = "default_short_title_weight")]
+    pub short_title_weight: f32,
+    #[serde(default = "default_short_heading_weight")]
+    pub short_heading_weight: f32,
+    #[serde(default = "default_short_body_weight")]
+    pub short_body_weight: f32,
+    #[serde(default = "default_long_vec_weight")]
+    pub long_vec_weight: f32,
+    #[serde(default = "default_long_lex_weight")]
+    pub long_lex_weight: f32,
+    #[serde(default = "default_long_title_weight")]
+    pub long_title_weight: f32,
+    #[serde(default = "default_long_heading_weight")]
+    pub long_heading_weight: f32,
+    #[serde(default = "default_long_body_weight")]
+    pub long_body_weight: f32,
+    #[serde(default = "default_exact_heading_boost")]
+    pub exact_heading_boost: f32,
+    #[serde(default = "default_exact_body_boost")]
+    pub exact_body_boost: f32,
+    #[serde(default = "default_no_heading_penalty")]
+    pub no_heading_penalty: f32,
+    #[serde(default = "default_weak_heading_penalty")]
+    pub weak_heading_penalty: f32,
+    #[serde(default = "default_authority_bonus")]
+    pub authority_bonus: f32,
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f32,
+    #[serde(default = "default_short_rrf_vec_weight")]
+    pub short_rrf_vec_weight: f32,
+    #[serde(default = "default_short_rrf_lex_weight")]
+    pub short_rrf_lex_weight: f32,
+}
+
+fn default_short_vec_weight() -> f32 {
+    0.25
+}
+fn default_short_lex_weight() -> f32 {
+    0.35
+}
+fn default_short_title_weight() -> f32 {
+    0.22
+}
+fn default_short_heading_weight() -> f32 {
+    0.12
+}
+fn default_short_body_weight() -> f32 {
+    0.06
+}
+fn default_long_vec_weight() -> f32 {
+    0.35
+}
+fn default_long_lex_weight() -> f32 {
+    0.20
+}
+fn default_long_title_weight() -> f32 {
+    0.20
+}
+fn default_long_heading_weight() -> f32 {
+    0.15
+}
+fn default_long_body_weight() -> f32 {
+    0.10
+}
+fn default_exact_heading_boost() -> f32 {
+    0.25
+}
+fn default_exact_body_boost() -> f32 {
+    0.10
+}
+fn default_no_heading_penalty() -> f32 {
+    0.55
+}
+fn default_weak_heading_penalty() -> f32 {
+    0.78
+}
+fn default_authority_bonus() -> f32 {
+    0.08
+}
+fn default_rrf_k() -> f32 {
+    60.0
+}
+fn default_short_rrf_vec_weight() -> f32 {
+    0.6
+}
+fn default_short_rrf_lex_weight() -> f32 {
+    1.8
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,6 +199,8 @@ fn default_seeds_path() -> String {
 }
 
 pub fn load() -> Result<Config, Box<dyn std::error::Error>> {
-    let text = std::fs::read_to_string("config.toml")?;
+    let config_path =
+        std::env::var("SEARCH_ENGINE_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string());
+    let text = std::fs::read_to_string(config_path)?;
     Ok(toml::from_str(&text)?)
 }

@@ -1,0 +1,17 @@
+{
+  "name": "retrieval-xray-tui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "tui": "tsx src/index.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.1.100"
+  },
+  "devDependencies": {
+    "@types/node": "^24.6.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

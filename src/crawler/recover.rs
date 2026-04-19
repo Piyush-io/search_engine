@@ -12,6 +12,7 @@ struct RecoveryCounters {
     invalid_frontier_urls: usize,
     invalid_content_urls: usize,
     invalid_page_states: usize,
+    skipped_low_quality_hosts: usize,
 }
 
 pub async fn load_frontier_into_scheduler(
@@ -157,6 +158,11 @@ pub async fn enqueue_due_recrawls(
             continue;
         };
 
+        if !policy::host_is_high_quality(host.as_str()) {
+            counters.skipped_low_quality_hosts += 1;
+            continue;
+        }
+
         let recrawl_after_ms = (policy::recrawl_days_for_host(
             (default_recrawl_after_ms / (24 * 60 * 60 * 1000)) as u64,
             host.as_str(),
@@ -206,10 +212,15 @@ pub async fn enqueue_due_recrawls(
         db.write(wb)?;
     }
 
-    if counters.invalid_content_urls > 0 || counters.invalid_page_states > 0 {
+    if counters.invalid_content_urls > 0
+        || counters.invalid_page_states > 0
+        || counters.skipped_low_quality_hosts > 0
+    {
         eprintln!(
-            "[recover] due-recrawl scan skipped invalid_content_urls={} invalid_page_states={}",
-            counters.invalid_content_urls, counters.invalid_page_states
+            "[recover] due-recrawl scan skipped invalid_content_urls={} invalid_page_states={} low_quality_pages={}",
+            counters.invalid_content_urls,
+            counters.invalid_page_states,
+            counters.skipped_low_quality_hosts
         );
     }
 

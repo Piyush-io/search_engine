@@ -26,17 +26,32 @@ fn tally_cf(
     Ok(total)
 }
 
-fn print_top(title: &str, map: &HashMap<String, usize>) {
+fn parse_limit() -> usize {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--limit" {
+            if let Some(value) = args.next() {
+                if let Ok(limit) = value.parse::<usize>() {
+                    return limit.max(1);
+                }
+            }
+        }
+    }
+    20
+}
+
+fn print_top(title: &str, map: &HashMap<String, usize>, limit: usize) {
     let mut v: Vec<_> = map.iter().collect();
     v.sort_by(|a, b| b.1.cmp(a.1));
 
     println!("{}", title);
-    for (idx, (domain, count)) in v.into_iter().take(20).enumerate() {
+    for (idx, (domain, count)) in v.into_iter().take(limit).enumerate() {
         println!("{:>2}. {:<40} {}", idx + 1, domain, count);
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let limit = parse_limit();
     let cfg = config::load()?;
     let db = storage::open_db_read_only(&cfg.paths.db_path)?;
 
@@ -48,9 +63,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("seen_total={} queued_total={}", seen_total, queued_total);
     println!();
-    print_top("Top domains in seen:", &seen_map);
+    print_top("Top domains in seen:", &seen_map, limit);
     println!();
-    print_top("Top domains in queue:", &queued_map);
+    print_top("Top domains in queue:", &queued_map, limit);
 
     Ok(())
 }

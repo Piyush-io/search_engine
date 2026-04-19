@@ -1,7 +1,12 @@
 target/
 .fastembed_cache/
+
+# runtime data directories
 crawl_data/
+crawl_data.high_quality/
 lexical_index/
+
+# index artifacts
 hnsw_index.bin
 wiki_hnsw.bin
 *.hnsw.data
@@ -18,7 +23,24 @@ __pycache__/
 # logs / reports
 *.log
 crawl_output.txt
-reports/benchmark_results.json
+reports/
+
+# local TUI dependencies
+tui/node_modules/
 
 # local notes
 agents.md
+
+# runtime database files
+CURRENT
+IDENTITY
+LOCK
+LOG
+LOG.old.*
+MANIFEST-*
+OPTIONS-*
+
+# high quality runtime data (large)
+hnsw_index.high_quality.bin
+lexical_index.high_quality/
+

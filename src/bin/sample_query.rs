@@ -1,13 +1,7 @@
-use std::{collections::HashSet, path::Path, sync::Arc};
-
 use search_engine::{
     config,
     embeddings::client,
-    search::{
-        bruteforce::BruteForceIndex, composite::CompositeVectorIndex, hnsw::HnswIndex,
-        lexical::LexicalIndex, query, vector_index::VectorIndex,
-    },
-    storage,
+    search::{bootstrap, query},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,48 +17,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load()?;
     println!("[sample_query] {}", client::backend_info()?);
 
-    let db = Arc::new(storage::open_db(&cfg.paths.db_path)?);
-    let index_backend = cfg.hnsw.backend.to_ascii_lowercase();
-    let index: Arc<dyn VectorIndex> = if index_backend == "bruteforce" {
-        let idx = if Path::new(&cfg.paths.index_path).exists() {
-            BruteForceIndex::load_from_path(&cfg.paths.index_path)?
-        } else {
-            BruteForceIndex::new(cfg.embedding.dim)
-        };
-        Arc::new(idx)
-    } else {
-        let base_index: Arc<dyn VectorIndex> = if Path::new(&cfg.paths.index_path).exists() {
-            Arc::new(HnswIndex::load_from_path(&cfg.paths.index_path)?)
-        } else {
-            Arc::new(HnswIndex::with_params(
-                cfg.embedding.dim,
-                cfg.hnsw.m,
-                cfg.hnsw.ef_construction,
-                cfg.hnsw.ef_search,
-                cfg.hnsw.max_elements,
-            ))
-        };
-
-        let delta = if Path::new(&cfg.paths.vector_delta_path).exists() {
-            Some(BruteForceIndex::load_from_path(
-                &cfg.paths.vector_delta_path,
-            )?)
-        } else {
-            None
-        };
-        let tombstones = load_chunk_ids_from_cf(&db, storage::CF_VECTOR_TOMBSTONES)?;
-        Arc::new(CompositeVectorIndex::new(base_index, delta, tombstones))
-    };
-
-    let lexical_meta = Path::new(&cfg.paths.lexical_index_path).join("meta.json");
-    let lexical = if lexical_meta.exists() {
-        Some(LexicalIndex::open(&cfg.paths.lexical_index_path)?)
-    } else {
-        None
-    };
+    let stack = bootstrap::load_search_stack()?;
 
     let started = std::time::Instant::now();
-    let results = query::run_query(&db, index.as_ref(), lexical.as_ref(), &query_text, top_k);
+    let results = query::run_query(
+        &stack.db,
+        stack.index.as_ref(),
+        stack.lexical.as_deref(),
+        &query_text,
+        top_k,
+        &cfg.ranking,
+    );
     println!(
         "[sample_query] query={query_text:?} hits={} elapsed_ms={}",
         results.len(),
@@ -85,10 +48,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .join(" ");
 
         println!(
-            "{rank}. score={score:.3} url={url}\n   heading={heading}\n   text={preview}",
+            "{rank}. score={score:.3} url={url}\n   heading={heading}\n   text={preview}\n   vec_score={vec:.3} lex_score={lex:.3} title_overlap={title:.3} heading_overlap={head:.3} body_overlap={body:.3} auth_bonus={auth:.3}",
             rank = idx + 1,
-            score = result.score,
+            score = result.final_score,
             url = result.source_url,
+            vec = result.vector_score,
+            lex = result.lexical_score,
+            title = result.title_overlap,
+            head = result.heading_overlap,
+            body = result.body_overlap,
+            auth = result.authority_bonus,
         );
     }
 
@@ -97,17 +66,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-fn load_chunk_ids_from_cf(
-    db: &rocksdb::DB,
-    name: &str,
-) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
-    let cf = storage::cf(db, name)?;
-    let mut out = HashSet::new();
-    for item in db.iterator_cf(cf, rocksdb::IteratorMode::Start) {
-        let (key, _) = item?;
-        out.insert(String::from_utf8(key.to_vec())?);
-    }
-    Ok(out)
 }

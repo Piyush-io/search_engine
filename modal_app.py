@@ -1,8 +1,15 @@
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import time
+import json
+import tomllib
+from html import unescape
 from pathlib import Path
+from urllib.parse import quote_plus
+from urllib.request import urlopen
 
 import modal
 
@@ -16,6 +23,11 @@ DATA_DIR = "/data"
 RESULTS_DIR = "/results"
 REMOTE_CONFIG = f"{REPO_DIR}/config.toml"
 REMOTE_MODAL_CONFIG = f"{REPO_DIR}/config.modal.toml"
+REMOTE_HIGH_QUALITY_CONFIG = f"{REPO_DIR}/config.high_quality.toml"
+REMOTE_RUNTIME_CONFIG = f"{REPO_DIR}/config.runtime.toml"
+PERSISTENT_SEARCH_CLS_NAME = "PersistentSearchSession"
+PERSISTENT_SEARCH_WEB_FUNCTION_NAME = "persistent_search_web"
+PERSISTENT_SEARCH_PORT = 3000
 CUDA_BASE_IMAGE = "nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04"
 CUDA_RUNTIME_PATHS = [
     "/usr/local/cuda/lib64",
@@ -51,6 +63,8 @@ context_depth = 3
 window_size = 3
 window_overlap = 1
 
+[ranking]
+
 [rocksdb]
 block_cache_mb = 256
 
@@ -78,10 +92,14 @@ REMOTE_SOURCE_IGNORE = [
     "__pycache__/**",
     "crawl_data",
     "crawl_data/**",
+    "crawl_data.high_quality",
+    "crawl_data.high_quality/**",
     "crawl_data.local_backup",
     "crawl_data.local_backup/**",
     "lexical_index",
     "lexical_index/**",
+    "lexical_index.high_quality",
+    "lexical_index.high_quality/**",
     "lexical_index.local_backup",
     "lexical_index.local_backup/**",
     "modal_restore_tmp",
@@ -170,6 +188,48 @@ def _run_with_output(cmd: str, cwd: str | None = None, env: dict | None = None) 
     return completed.stdout + completed.stderr
 
 
+def _fetch_http(url: str, timeout: int = 30) -> str:
+    with urlopen(url, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _wait_for_http_ready(url: str, timeout_s: int = 300) -> None:
+    deadline = time.time() + timeout_s
+    last_error: Exception | None = None
+
+    while time.time() < deadline:
+        try:
+            _fetch_http(url, timeout=10)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(1)
+
+    raise RuntimeError(f"timed out waiting for server {url}: {last_error}")
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "query"
+
+
+def _extract_results_from_search_html(html: str, top_k: int) -> list[tuple[str, str]]:
+    pattern = re.compile(
+        r'<div class="result-url"><cite>(.*?)</cite></div>\s*<a class="result-title" href="[^"]+">(.*?)</a>',
+        re.S,
+    )
+    results: list[tuple[str, str]] = []
+
+    for url_text, title_text in pattern.findall(html):
+        clean_url = re.sub(r"<[^>]+>", "", url_text)
+        clean_title = re.sub(r"<[^>]+>", "", title_text)
+        results.append((unescape(clean_url).strip(), unescape(clean_title).strip()))
+        if len(results) >= top_k:
+            break
+
+    return results
+
+
 def _prepend_env_path(env: dict, key: str, parts: list[str]) -> None:
     existing = env.get(key, "")
     merged = [part for part in parts if part]
@@ -179,22 +239,83 @@ def _prepend_env_path(env: dict, key: str, parts: list[str]) -> None:
         env[key] = ":".join(merged)
 
 
-def _prepare_workspace(git_ref: str, use_gpu: bool = False) -> dict:
+def _toml_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value)
+    return str(value)
+
+
+def _write_runtime_config(config_name: str) -> str:
+    config_sources = {
+        "modal": Path(REMOTE_MODAL_CONFIG),
+        "high_quality": Path(REMOTE_HIGH_QUALITY_CONFIG),
+    }
+    source = config_sources.get(config_name)
+    if source is None:
+        raise RuntimeError(f"unknown config profile: {config_name}")
+    if not source.exists():
+        if config_name == "modal":
+            Path(REMOTE_CONFIG).write_text(FALLBACK_MODAL_CONFIG)
+            return REMOTE_CONFIG
+        raise RuntimeError(f"required config file missing from workspace snapshot: {source}")
+
+    with source.open("rb") as handle:
+        config = tomllib.load(handle)
+
+    paths = dict(config.get("paths", {}))
+    suffixes = {
+        "db_path": "crawl_data",
+        "index_path": "hnsw_index.bin",
+        "lexical_index_path": "lexical_index",
+        "wiki_index_path": "wiki_hnsw.bin",
+        "vector_delta_path": "hnsw_delta.bin",
+    }
+    if config_name == "high_quality":
+        suffixes = {
+            "db_path": "crawl_data.high_quality",
+            "index_path": "hnsw_index.high_quality.bin",
+            "lexical_index_path": "lexical_index.high_quality",
+            "wiki_index_path": "wiki_hnsw.high_quality.bin",
+            "vector_delta_path": "hnsw_delta.high_quality.bin",
+        }
+
+    for key, suffix in suffixes.items():
+        paths[key] = f"{DATA_DIR}/{suffix}"
+
+    seeds_name = Path(paths.get("seeds_path", "seeds.md")).name
+    paths["seeds_path"] = f"{REPO_DIR}/{seeds_name}"
+    config["paths"] = paths
+
+    lines: list[str] = []
+    for section, values in config.items():
+        lines.append(f"[{section}]")
+        for key, value in values.items():
+            lines.append(f"{key} = {_toml_value(value)}")
+        lines.append("")
+
+    Path(REMOTE_RUNTIME_CONFIG).write_text("\n".join(lines).strip() + "\n")
+    return REMOTE_RUNTIME_CONFIG
+
+
+def _prepare_workspace(
+    git_ref: str, use_gpu: bool = False, config_name: str = "modal"
+) -> dict:
     _ensure_repo(git_ref)
 
-    if Path(REMOTE_MODAL_CONFIG).exists():
-        shutil.copyfile(REMOTE_MODAL_CONFIG, REMOTE_CONFIG)
-    else:
-        Path(REMOTE_CONFIG).write_text(FALLBACK_MODAL_CONFIG)
+    runtime_config = _write_runtime_config(config_name)
     Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
     Path(RESULTS_DIR).mkdir(parents=True, exist_ok=True)
     Path(f"{DATA_DIR}/crawl_data").mkdir(parents=True, exist_ok=True)
+    Path(f"{DATA_DIR}/crawl_data.high_quality").mkdir(parents=True, exist_ok=True)
     Path(f"{RESULTS_DIR}/reports").mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     env["MALLOC_ARENA_MAX"] = "2"
     env.setdefault("RAYON_NUM_THREADS", "12")
     env.setdefault("CARGO_BUILD_JOBS", "12")
+    env["SEARCH_ENGINE_CONFIG_PATH"] = runtime_config
 
     if use_gpu:
         env["CUDA_PATH"] = "/usr/local/cuda"
@@ -205,6 +326,163 @@ def _prepare_workspace(git_ref: str, use_gpu: bool = False) -> dict:
         )
 
     return env
+
+
+@app.cls(
+    image=gpu_image,
+    gpu="L40S",
+    cpu=8,
+    memory=32768,
+    volumes={DATA_DIR: data_volume, RESULTS_DIR: results_volume},
+    timeout=60 * 60 * 12,
+    min_containers=1,
+    scaledown_window=60 * 60,
+)
+class PersistentSearchSession:
+    @modal.enter()
+    def start(self) -> None:
+        env = _prepare_workspace(DEFAULT_GIT_REF, use_gpu=True)
+        _run(
+            "cargo build --release --bin search_engine --bin stats --bin queue_stats --bin index_stats",
+            cwd=REPO_DIR,
+            env=env,
+        )
+        _configure_onnxruntime_library_path(env)
+
+        log_path = Path("/tmp/persistent_search_server.log")
+        self.server_log_handle = log_path.open("a", buffering=1)
+        self.server_process = subprocess.Popen(
+            ["./target/release/search_engine"],
+            cwd=REPO_DIR,
+            env=env,
+            text=True,
+            stdout=self.server_log_handle,
+            stderr=subprocess.STDOUT,
+        )
+        _wait_for_http_ready(f"http://127.0.0.1:{PERSISTENT_SEARCH_PORT}/")
+        self.env = env
+
+    @modal.exit()
+    def stop(self) -> None:
+        if self.server_process and self.server_process.poll() is None:
+            self.server_process.terminate()
+            try:
+                self.server_process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.server_process.kill()
+                self.server_process.wait(timeout=5)
+
+        if self.server_log_handle is not None:
+            self.server_log_handle.close()
+
+    def _query_urls(self, query_text: str, top_k: int) -> dict[str, str]:
+        encoded = quote_plus(query_text)
+        base = f"http://127.0.0.1:{PERSISTENT_SEARCH_PORT}"
+        return {
+            "search": f"{base}/search?q={encoded}",
+            "debug_html": f"{base}/debug/search?q={encoded}",
+            "debug_json": f"{base}/debug/api/search?q={encoded}&k={top_k}",
+        }
+
+    def _write_query_reports(self, query_text: str, top_k: int) -> str:
+        urls = self._query_urls(query_text, top_k)
+        search_html = _fetch_http(urls["search"])
+        debug_html = _fetch_http(urls["debug_html"])
+        debug_json = _fetch_http(urls["debug_json"])
+        debug_payload = json.loads(debug_json)
+        results = _extract_results_from_search_html(search_html, top_k)
+
+        slug = _slugify(query_text)
+        html_path = _write_report(f"persistent_debug_{slug}.html", debug_html)
+        json_path = _write_report(
+            f"persistent_debug_{slug}.json",
+            json.dumps(debug_payload, indent=2, sort_keys=True),
+        )
+        lines = [
+            f"query={query_text!r}",
+            f"top_k={top_k}",
+            f"elapsed_ms={debug_payload.get('elapsed_ms', 0)}",
+            f"result_count={debug_payload.get('result_count', 0)}",
+            f"debug_html={html_path}",
+            f"debug_json={json_path}",
+            "results:",
+        ]
+
+        if results:
+            for idx, (url_text, title_text) in enumerate(results, start=1):
+                lines.append(f"{idx}. {title_text} — {url_text}")
+        else:
+            lines.append("(no parsed results)")
+
+        txt_path = _write_report(f"persistent_query_{slug}.txt", "\n".join(lines))
+        results_volume.commit()
+        return f"{txt_path}\n\n" + "\n".join(lines)
+
+    @modal.method()
+    def sample_query(
+        self,
+        query_text: str = "what is a B-tree",
+        top_k: int = 5,
+    ) -> str:
+        return self._write_query_reports(query_text, top_k)
+
+    @modal.method()
+    def query_suite(
+        self,
+        queries_text: str = "what is a B-tree||tcp three-way handshake||rust lifetime elision rules",
+        top_k: int = 5,
+    ) -> str:
+        queries = [q.strip() for q in queries_text.split("||") if q.strip()]
+        sections = []
+        for query_text in queries:
+            sections.append(self._write_query_reports(query_text, top_k))
+        combined = "\n\n".join(sections)
+        path = _write_report("persistent_query_suite.txt", combined)
+        results_volume.commit()
+        return f"{path}\n\n{combined}"
+
+    @modal.method()
+    def verify_state(self) -> str:
+        if self.env is None:
+            raise RuntimeError("persistent session environment was not initialized")
+
+        stats_out = _capture("./target/release/stats", cwd=REPO_DIR, env=self.env)
+        queue_out = _capture("./target/release/queue_stats", cwd=REPO_DIR, env=self.env)
+        index_out = _capture("./target/release/index_stats", cwd=REPO_DIR, env=self.env)
+        report = (
+            "[stats]\n"
+            f"{stats_out.strip()}\n\n"
+            "[queue_stats]\n"
+            f"{queue_out.strip()}\n\n"
+            "[index_stats]\n"
+            f"{index_out.strip()}\n"
+        )
+        path = _write_report("persistent_verify_state.txt", report)
+        results_volume.commit()
+        return f"{path}\n\n{report}"
+
+
+@app.function(
+    image=gpu_image,
+    gpu="L40S",
+    cpu=8,
+    memory=32768,
+    volumes={DATA_DIR: data_volume, RESULTS_DIR: results_volume},
+    timeout=60 * 60 * 12,
+    min_containers=1,
+)
+@modal.web_server(PERSISTENT_SEARCH_PORT, startup_timeout=900.0, label="search")
+def persistent_search_web() -> None:
+    env = _prepare_workspace(DEFAULT_GIT_REF, use_gpu=True)
+    _run("cargo build --release --bin search_engine", cwd=REPO_DIR, env=env)
+    _configure_onnxruntime_library_path(env)
+    subprocess.Popen(
+        ["./target/release/search_engine"],
+        cwd=REPO_DIR,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    )
 
 
 @app.function(
@@ -312,8 +590,9 @@ def sample_query_remote(
     git_ref: str = DEFAULT_GIT_REF,
     query_text: str = "what is a B-tree",
     top_k: int = 5,
+    config_name: str = "modal",
 ) -> str:
-    env = _prepare_workspace(git_ref, use_gpu=True)
+    env = _prepare_workspace(git_ref, use_gpu=True, config_name=config_name)
     _run("cargo build --release --bin sample_query", cwd=REPO_DIR, env=env)
     _configure_onnxruntime_library_path(env)
     out = _run_with_output(
@@ -322,6 +601,33 @@ def sample_query_remote(
         env=env,
     )
     path = _write_report("sample_query.txt", out)
+    results_volume.commit()
+    return path
+
+
+@app.function(
+    image=gpu_image,
+    gpu="L40S",
+    cpu=8,
+    memory=32768,
+    volumes={DATA_DIR: data_volume, RESULTS_DIR: results_volume},
+    timeout=60 * 60,
+)
+def query_suite_remote(
+    git_ref: str = DEFAULT_GIT_REF,
+    queries_text: str = "what is a B-tree||tcp three-way handshake||rust lifetime elision rules",
+    top_k: int = 5,
+    config_name: str = "modal",
+) -> str:
+    env = _prepare_workspace(git_ref, use_gpu=True, config_name=config_name)
+    _run("cargo build --release --bin query_suite", cwd=REPO_DIR, env=env)
+    _configure_onnxruntime_library_path(env)
+    out = _run_with_output(
+        f"./target/release/query_suite {top_k} {shlex.quote(queries_text)}",
+        cwd=REPO_DIR,
+        env=env,
+    )
+    path = _write_report("query_suite.txt", out)
     results_volume.commit()
     return path
 
@@ -360,6 +666,36 @@ def lexical_full_cpu(git_ref: str = DEFAULT_GIT_REF) -> str:
     summary = _summarize_data_dir()
     path = _write_report("lexical_full_stats.txt", out + "\n\n" + summary)
     data_volume.commit()
+    results_volume.commit()
+    return path
+
+
+@app.function(
+    image=cpu_image,
+    cpu=4,
+    memory=16384,
+    volumes={DATA_DIR: data_volume, RESULTS_DIR: results_volume},
+    timeout=60 * 30,
+)
+def verify_remote_state(git_ref: str = DEFAULT_GIT_REF) -> str:
+    env = _prepare_workspace(git_ref)
+    _run(
+        "cargo build --release --bin stats --bin queue_stats --bin index_stats",
+        cwd=REPO_DIR,
+        env=env,
+    )
+    stats_out = _capture("./target/release/stats", cwd=REPO_DIR, env=env)
+    queue_out = _capture("./target/release/queue_stats", cwd=REPO_DIR, env=env)
+    index_out = _capture("./target/release/index_stats", cwd=REPO_DIR, env=env)
+    report = (
+        "[stats]\n"
+        f"{stats_out.strip()}\n\n"
+        "[queue_stats]\n"
+        f"{queue_out.strip()}\n\n"
+        "[index_stats]\n"
+        f"{index_out.strip()}\n"
+    )
+    path = _write_report("verify_remote_state.txt", report)
     results_volume.commit()
     return path
 
@@ -420,6 +756,107 @@ def clear_data_artifacts() -> str:
     return "cleared derived artifacts under /data (preserved /data/crawl_data)"
 
 
+@app.function(
+    image=cpu_image,
+    cpu=2,
+    memory=8192,
+    volumes={DATA_DIR: data_volume},
+    timeout=60 * 60,
+)
+def clear_high_quality_synced_db() -> str:
+    _run(
+        f"rm -rf {DATA_DIR}/crawl_data.high_quality && mkdir -p {DATA_DIR}/crawl_data.high_quality",
+        cwd="/",
+    )
+    data_volume.commit()
+    return "cleared /data/crawl_data.high_quality"
+
+
+@app.function(
+    image=cpu_image,
+    cpu=2,
+    memory=4096,
+    volumes={DATA_DIR: data_volume, RESULTS_DIR: results_volume},
+    timeout=30 * 60,
+)
+def clear_high_quality_data_artifacts() -> str:
+    targets = [
+        Path(f"{DATA_DIR}/hnsw_index.high_quality.bin"),
+        Path(f"{DATA_DIR}/hnsw_index.high_quality.bin.hnsw.data"),
+        Path(f"{DATA_DIR}/hnsw_index.high_quality.bin.hnsw.graph"),
+        Path(f"{DATA_DIR}/hnsw_delta.high_quality.bin"),
+        Path(f"{DATA_DIR}/lexical_index.high_quality"),
+        Path(f"{DATA_DIR}/wiki_hnsw.high_quality.bin"),
+        Path(f"{DATA_DIR}/wiki_hnsw.high_quality.bin.hnsw.data"),
+        Path(f"{DATA_DIR}/wiki_hnsw.high_quality.bin.hnsw.graph"),
+    ]
+    for target in targets:
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink()
+    data_volume.commit()
+    return "cleared derived high-quality artifacts under /data (preserved /data/crawl_data.high_quality)"
+
+
+@app.function(
+    image=gpu_image,
+    gpu="L40S",
+    cpu=16,
+    memory=131072,
+    volumes={DATA_DIR: data_volume, RESULTS_DIR: results_volume},
+    timeout=60 * 60 * 12,
+)
+def phase23_high_quality_remote(git_ref: str = DEFAULT_GIT_REF) -> str:
+    env = _prepare_workspace(git_ref, use_gpu=True, config_name="high_quality")
+    _run(
+        "cargo build --release --bin normalize_pages --bin embed --bin index --bin lexical_index --bin stats --bin queue_stats --bin index_stats --bin domain_stats --bin sample_query --bin query_suite",
+        cwd=REPO_DIR,
+        env=env,
+    )
+    _configure_onnxruntime_library_path(env)
+
+    clear_targets = [
+        Path(f"{DATA_DIR}/hnsw_index.high_quality.bin"),
+        Path(f"{DATA_DIR}/hnsw_index.high_quality.bin.hnsw.data"),
+        Path(f"{DATA_DIR}/hnsw_index.high_quality.bin.hnsw.graph"),
+        Path(f"{DATA_DIR}/hnsw_delta.high_quality.bin"),
+        Path(f"{DATA_DIR}/lexical_index.high_quality"),
+    ]
+    for target in clear_targets:
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        elif target.exists():
+            target.unlink()
+
+    sections = []
+    commands = [
+        ("normalize_pages", "./target/release/normalize_pages"),
+        ("embed_full_scan", "./target/release/embed --full-scan"),
+        ("index_full", "./target/release/index --full"),
+        ("lexical_index_full", "./target/release/lexical_index --full"),
+        ("stats", "./target/release/stats"),
+        ("queue_stats", "./target/release/queue_stats"),
+        ("index_stats", "./target/release/index_stats"),
+        ("domain_stats", "./target/release/domain_stats --limit 50"),
+        ("sample_query_btree", './target/release/sample_query "what is a B-tree" 5'),
+        (
+            "query_suite",
+            './target/release/query_suite 5 "what is a B-tree||tcp three-way handshake||rust lifetime elision rules||sqlite wal checkpoint"',
+        ),
+    ]
+
+    for title, command in commands:
+        output = _run_with_output(command, cwd=REPO_DIR, env=env)
+        sections.append(f"[{title}]\n{output.strip()}")
+
+    report = "\n\n".join(sections) + "\n"
+    path = _write_report("phase23_high_quality_remote.txt", report)
+    data_volume.commit()
+    results_volume.commit()
+    return f"{path}\n\n{report}"
+
+
 def _configure_onnxruntime_library_path(env: dict) -> None:
     candidates = [
         Path(REPO_DIR) / "target/release",
@@ -478,6 +915,49 @@ def _summarize_data_dir() -> str:
     return summary
 
 
+def _deployed_persistent_session():
+    cls = modal.Cls.from_name(APP_NAME, PERSISTENT_SEARCH_CLS_NAME)
+    return cls()
+
+
+def _persistent_search_web_url() -> str:
+    fn = modal.Function.from_name(APP_NAME, PERSISTENT_SEARCH_WEB_FUNCTION_NAME)
+    url = fn.get_web_url()
+    if not url:
+        raise RuntimeError("persistent search web endpoint is not deployed")
+    return url.rstrip("/")
+
+
+def _persistent_web_query_report(query_text: str, top_k: int) -> str:
+    base_url = _persistent_search_web_url()
+    encoded = quote_plus(query_text)
+    search_html = _fetch_http(f"{base_url}/search?q={encoded}", timeout=180)
+    debug_url = f"{base_url}/debug/search?q={encoded}"
+    results = _extract_results_from_search_html(search_html, top_k)
+
+    lines = [
+        f"query={query_text!r}",
+        f"top_k={top_k}",
+        f"debug_url={debug_url}",
+        "results:",
+    ]
+
+    if results:
+        for idx, (url_text, title_text) in enumerate(results, start=1):
+            lines.append(f"{idx}. {title_text} — {url_text}")
+    else:
+        lines.append("(no parsed results)")
+
+    return "\n".join(lines)
+
+
+def _persistent_web_query_suite_report(queries_text: str, top_k: int) -> str:
+    queries = [q.strip() for q in queries_text.split("||") if q.strip()]
+    return "\n\n".join(
+        _persistent_web_query_report(query_text, top_k) for query_text in queries
+    )
+
+
 @app.local_entrypoint()
 def main(
     action: str = "help",
@@ -485,11 +965,12 @@ def main(
     local_db: str = "./crawl_data",
     samples: int = 2000,
     query_text: str = "what is a B-tree",
+    queries_text: str = "what is a B-tree||tcp three-way handshake||rust lifetime elision rules",
     top_k: int = 5,
 ):
     if action == "help":
         print(
-            "Available actions: sync_db, tests, bench_embed, bench_query, bench_ann, embed_full, index_full, lexical_full, sample_query, clear_results, clear_data_artifacts"
+            "Available actions: sync_db, sync_high_quality_db, tests, bench_embed, bench_query, bench_ann, embed_full, index_full, lexical_full, verify_state, sample_query, query_suite, persistent_query, persistent_query_suite, persistent_verify_state, phase23_high_quality, clear_results, clear_data_artifacts, clear_high_quality_data_artifacts"
         )
         return
 
@@ -503,6 +984,16 @@ def main(
         print("Uploaded directory to volume path /crawl_data")
         return
 
+    if action == "sync_high_quality_db":
+        src = Path(local_db)
+        if not src.exists() or not src.is_dir():
+            raise SystemExit(f"local DB directory not found: {src}")
+        print(clear_high_quality_synced_db.remote())
+        with data_volume.batch_upload(force=True) as batch:
+            batch.put_directory(str(src), "/crawl_data.high_quality")
+        print("Uploaded directory to volume path /crawl_data.high_quality")
+        return
+
     actions = {
         "tests": lambda: print(run_tests_cpu.remote(git_ref)),
         "bench_embed": lambda: print(bench_embed_gpu.remote(git_ref, samples)),
@@ -511,11 +1002,28 @@ def main(
         "embed_full": lambda: print(embed_full_gpu.remote(git_ref)),
         "index_full": lambda: print(index_full_cpu.remote(git_ref)),
         "lexical_full": lambda: print(lexical_full_cpu.remote(git_ref)),
+        "verify_state": lambda: print(verify_remote_state.remote(git_ref)),
         "sample_query": lambda: print(
             sample_query_remote.remote(git_ref, query_text, top_k)
         ),
+        "query_suite": lambda: print(
+            query_suite_remote.remote(git_ref, queries_text, top_k)
+        ),
+        "phase23_high_quality": lambda: print(
+            phase23_high_quality_remote.remote(git_ref)
+        ),
+        "persistent_query": lambda: print(_persistent_web_query_report(query_text, top_k)),
+        "persistent_query_suite": lambda: print(
+            _persistent_web_query_suite_report(queries_text, top_k)
+        ),
+        "persistent_verify_state": lambda: print(
+            _deployed_persistent_session().verify_state.remote()
+        ),
         "clear_results": lambda: print(clear_results.remote()),
         "clear_data_artifacts": lambda: print(clear_data_artifacts.remote()),
+        "clear_high_quality_data_artifacts": lambda: print(
+            clear_high_quality_data_artifacts.remote()
+        ),
     }
 
     if action not in actions:

@@ -1,12 +1,14 @@
-use std::{collections::HashSet, path::Path, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     Router,
     extract::{Query, State},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::get,
+    Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -14,12 +16,9 @@ use search_engine::{
     config,
     embeddings::client,
     knowledge::panel,
-    search::{
-        bruteforce::BruteForceIndex, composite::CompositeVectorIndex, hnsw::HnswIndex,
-        lexical::LexicalIndex, query, vector_index::VectorIndex,
-    },
+    search::{bootstrap, lexical::LexicalIndex, query, vector_index::VectorIndex},
     storage,
-    web::{serp, tracking},
+    web::{debug, serp, tracking},
 };
 
 #[derive(Clone)]
@@ -27,6 +26,7 @@ struct AppState {
     db: Arc<rocksdb::DB>,
     index: Arc<dyn VectorIndex>,
     lexical: Option<Arc<LexicalIndex>>,
+    ranking: Arc<config::RankingConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,73 +35,48 @@ struct SearchParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct DebugSearchParams {
+    q: Option<String>,
+    k: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DebugEvalParams {
+    qrels: Option<String>,
+    queries: Option<String>,
+    k: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ClickParams {
     d: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ApiError {
+    error: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load()?;
     println!("[server] {}", client::backend_info()?);
-    let db = Arc::new(storage::open_db(&cfg.paths.db_path)?);
+    let stack = bootstrap::load_search_stack()?;
+    let ranking = Arc::new(cfg.ranking.clone());
 
-    let index_backend = cfg.hnsw.backend.to_ascii_lowercase();
-    println!(
-        "[server] loading vector index from {} (this may take a minute)...",
-        cfg.paths.index_path
-    );
-    let t0 = std::time::Instant::now();
-    let index: Arc<dyn VectorIndex> = if index_backend == "bruteforce" {
-        let idx = if Path::new(&cfg.paths.index_path).exists() {
-            BruteForceIndex::load_from_path(&cfg.paths.index_path)?
-        } else {
-            BruteForceIndex::new(cfg.embedding.dim)
-        };
-        Arc::new(idx)
-    } else {
-        let base_index: Arc<dyn VectorIndex> = if Path::new(&cfg.paths.index_path).exists() {
-            Arc::new(HnswIndex::load_from_path(&cfg.paths.index_path)?)
-        } else {
-            Arc::new(HnswIndex::with_params(
-                cfg.embedding.dim,
-                cfg.hnsw.m,
-                cfg.hnsw.ef_construction,
-                cfg.hnsw.ef_search,
-                cfg.hnsw.max_elements,
-            ))
-        };
-
-        let delta = if Path::new(&cfg.paths.vector_delta_path).exists() {
-            Some(BruteForceIndex::load_from_path(
-                &cfg.paths.vector_delta_path,
-            )?)
-        } else {
-            None
-        };
-        let tombstones = load_chunk_ids_from_cf(&db, storage::CF_VECTOR_TOMBSTONES)?;
-
-        Arc::new(CompositeVectorIndex::new(base_index, delta, tombstones))
+    let state = AppState {
+        db: stack.db,
+        index: stack.index,
+        lexical: stack.lexical,
+        ranking,
     };
-
-    println!(
-        "[server] vector backend={} entries={} loaded in {:.1}s",
-        index_backend,
-        index.len(),
-        t0.elapsed().as_secs_f64(),
-    );
-
-    let lexical_meta = Path::new(&cfg.paths.lexical_index_path).join("meta.json");
-    let lexical = if lexical_meta.exists() {
-        Some(Arc::new(LexicalIndex::open(&cfg.paths.lexical_index_path)?))
-    } else {
-        None
-    };
-
-    let state = AppState { db, index, lexical };
 
     let app = Router::new()
         .route("/", get(home_handler))
         .route("/search", get(search_handler))
+        .route("/debug/search", get(debug_handler))
+        .route("/debug/api/search", get(debug_api_search_handler))
+        .route("/debug/api/eval", get(debug_api_eval_handler))
         .route("/act", get(act_handler))
         .with_state(state);
 
@@ -128,23 +103,168 @@ async fn search_handler(
 
     let t0 = std::time::Instant::now();
 
-    let results = query::run_query(
-        &state.db,
-        state.index.as_ref(),
-        state.lexical.as_deref(),
-        &query_text,
-        10,
-    );
-    let panel = panel::build_panel(&state.db, &query_text);
+    let db = state.db.clone();
+    let index = state.index.clone();
+    let lexical = state.lexical.clone();
+    let ranking = state.ranking.clone();
+    let query_text_clone = query_text.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        query::run_query(
+            &db,
+            index.as_ref(),
+            lexical.as_deref(),
+            &query_text_clone,
+            10,
+            &ranking,
+        )
+    })
+    .await
+    .unwrap_or_default();
 
+    let panel = panel::build_panel(&state.db, &query_text);
     let elapsed_ms = t0.elapsed().as_millis();
 
+    let search_results: Vec<_> = results.iter().map(|r| r.to_search_result()).collect();
     Html(serp::render_results_page(
         &query_text,
-        &results,
+        &search_results,
         panel.as_ref(),
         elapsed_ms,
     ))
+}
+
+async fn debug_handler(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> impl IntoResponse {
+    let query_text = params.q.unwrap_or_default();
+
+    if query_text.trim().is_empty() {
+        return Html(serp::render_home_page());
+    }
+
+    let t0 = std::time::Instant::now();
+
+    let db = state.db.clone();
+    let index = state.index.clone();
+    let lexical = state.lexical.clone();
+    let ranking = state.ranking.clone();
+    let query_text_clone = query_text.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        query::run_query(
+            &db,
+            index.as_ref(),
+            lexical.as_deref(),
+            &query_text_clone,
+            10,
+            &ranking,
+        )
+    })
+    .await
+    .unwrap_or_default();
+
+    let elapsed_ms = t0.elapsed().as_millis();
+
+    Html(debug::render_debug_page(&query_text, &results, elapsed_ms))
+}
+
+async fn debug_api_search_handler(
+    State(state): State<AppState>,
+    Query(params): Query<DebugSearchParams>,
+) -> impl IntoResponse {
+    let query_text = params.q.unwrap_or_default();
+    let top_k = params.k.unwrap_or(10).clamp(1, 25);
+
+    if query_text.trim().is_empty() {
+        return Json(debug::build_debug_search_response(
+            "",
+            &[],
+            0,
+            state.ranking.as_ref(),
+        ));
+    }
+
+    let t0 = std::time::Instant::now();
+
+    let db = state.db.clone();
+    let index = state.index.clone();
+    let lexical = state.lexical.clone();
+    let ranking = state.ranking.clone();
+    let query_text_clone = query_text.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        query::run_query(
+            &db,
+            index.as_ref(),
+            lexical.as_deref(),
+            &query_text_clone,
+            top_k,
+            &ranking,
+        )
+    })
+    .await
+    .unwrap_or_default();
+
+    Json(debug::build_debug_search_response(
+        &query_text,
+        &results,
+        t0.elapsed().as_millis(),
+        state.ranking.as_ref(),
+    ))
+}
+
+async fn debug_api_eval_handler(
+    State(state): State<AppState>,
+    Query(params): Query<DebugEvalParams>,
+) -> Result<Json<debug::DebugEvalResponse>, (StatusCode, Json<ApiError>)> {
+    let qrels_path = params.qrels.unwrap_or_default();
+    let queries_path = params.queries.unwrap_or_default();
+
+    if qrels_path.trim().is_empty() || queries_path.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "Both qrels and queries parameters are required".to_string(),
+            }),
+        ));
+    }
+
+    let k_values = debug::parse_k_values(params.k.as_deref());
+
+    let db = state.db.clone();
+    let index = state.index.clone();
+    let lexical = state.lexical.clone();
+    let ranking = state.ranking.clone();
+
+    let report = tokio::task::spawn_blocking(move || {
+        debug::run_debug_evaluation(
+            &db,
+            index.as_ref(),
+            lexical.as_deref(),
+            &ranking,
+            &qrels_path,
+            &queries_path,
+            &k_values,
+        )
+    })
+    .await
+    .map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: format!("evaluation task failed: {err}"),
+            }),
+        )
+    })?
+    .map_err(|err| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+
+    Ok(Json(report))
 }
 
 async fn act_handler(
@@ -190,17 +310,4 @@ fn click_key(query: &str, position: usize, target: &str) -> String {
             .as_bytes(),
     );
     format!("{:x}", h.finalize())
-}
-
-fn load_chunk_ids_from_cf(
-    db: &rocksdb::DB,
-    name: &str,
-) -> Result<HashSet<String>, Box<dyn std::error::Error>> {
-    let cf = storage::cf(db, name)?;
-    let mut out = HashSet::new();
-    for item in db.iterator_cf(cf, rocksdb::IteratorMode::Start) {
-        let (key, _) = item?;
-        out.insert(String::from_utf8(key.to_vec())?);
-    }
-    Ok(out)
 }

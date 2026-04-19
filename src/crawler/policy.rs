@@ -23,7 +23,7 @@ pub fn domain_rate_limit_ms(default_ms: u64, host: &str) -> u64 {
     }
 }
 
-pub fn recrawl_days_for_host(default_days: u64, host: &str) -> u64 {
+pub fn host_is_high_quality(host: &str) -> bool {
     if host_matches_rule(host, "developer.mozilla.org")
         || host_matches_rule(host, "docs.python.org")
         || host_matches_rule(host, "doc.rust-lang.org")
@@ -43,34 +43,12 @@ pub fn recrawl_days_for_host(default_days: u64, host: &str) -> u64 {
         || host_matches_rule(host, "llvm.org")
         || host_matches_rule(host, "clang.llvm.org")
         || host_matches_rule(host, "gcc.gnu.org")
-    {
-        default_days.clamp(7, 30)
-    } else if host_matches_rule(host, "blog.cloudflare.com")
-        || host_matches_rule(host, "martinfowler.com")
-        || host_matches_rule(host, "blog.acolyer.org")
-        || host_matches_rule(host, "eng.uber.com")
-        || host_matches_rule(host, "netflixtechblog.com")
-        || host_matches_rule(host, "research.google")
-        || host_matches_rule(host, "blog.rust-lang.org")
-        || host_matches_rule(host, "simonwillison.net")
-        || host_matches_rule(host, "danluu.com")
-        || host_matches_rule(host, "rachelbythebay.com")
-        || host_matches_rule(host, "slack.engineering")
-        || host_matches_rule(host, "dropbox.tech")
-        || host_matches_rule(host, "shopify.engineering")
-        || host_matches_rule(host, "grafana.com")
-        || host_matches_rule(host, "www.elastic.co")
-        || host_matches_rule(host, "fly.io")
-        || host_matches_rule(host, "www.cockroachlabs.com")
-        || host_matches_rule(host, "jepsen.io")
-        || host_matches_rule(host, "martin.kleppmann.com")
-        || host_matches_rule(host, "muratbuffalo.blogspot.com")
-        || host_matches_rule(host, "thume.ca")
-        || host_matches_rule(host, "interrupt.memfault.com")
-        || host_matches_rule(host, "blog.cryptographyengineering.com")
-    {
-        default_days.clamp(30, 90)
-    } else if host_matches_rule(host, "pages.cs.wisc.edu")
+        || host_matches_rule(host, "cppreference.com")
+        || host_matches_rule(host, "sqlite.org")
+        || host_matches_rule(host, "www.postgresql.org")
+        || host_matches_rule(host, "cp-algorithms.com")
+        || host_matches_rule(host, "norvig.com")
+        || host_matches_rule(host, "pages.cs.wisc.edu")
         || host_matches_rule(host, "pdos.csail.mit.edu")
         || host_matches_rule(host, "www.cs.princeton.edu")
         || host_matches_rule(host, "www.cs.cornell.edu")
@@ -87,10 +65,105 @@ pub fn recrawl_days_for_host(default_days: u64, host: &str) -> u64 {
         || host_matches_rule(host, "quantum.country")
         || host_matches_rule(host, "learn.qiskit.org")
         || host_matches_rule(host, "missing.csail.mit.edu")
+        || host_matches_rule(host, "os.phil-opp.com")
+        || host_matches_rule(host, "lwn.net")
+        || host_matches_rule(host, "www.brendangregg.com")
+        || host_matches_rule(host, "www.linuxfromscratch.org")
+        || host_matches_rule(host, "www.agner.org")
+        || host_matches_rule(host, "uops.info")
+        || host_matches_rule(host, "sandpile.org")
+        || host_matches_rule(host, "eli.thegreenplace.net")
+        || host_matches_rule(host, "swtch.com")
+        || host_matches_rule(host, "xavierleroy.org")
+        || host_matches_rule(host, "faultlore.com")
+        || host_matches_rule(host, "www.interdb.jp")
+        || host_matches_rule(host, "jepsen.io")
+        || host_matches_rule(host, "martin.kleppmann.com")
+        || host_matches_rule(host, "explained.ai")
+        || host_matches_rule(host, "nlp.stanford.edu")
+        || host_matches_rule(host, "learnopengl.com")
+        || host_matches_rule(host, "vulkan-tutorial.com")
+        || host_matches_rule(host, "beej.us")
+        || host_matches_rule(host, "webassembly.org")
+        || host_matches_rule(host, "cryptopals.com")
+        || host_matches_rule(host, "blog.cryptographyengineering.com")
+        || host_matches_rule(host, "www.usenix.org")
+        || host_matches_rule(host, "isocpp.org")
+        || host_matches_rule(host, "abseil.io")
+        || host_matches_rule(host, "interrupt.memfault.com")
+        || host_matches_rule(host, "blog.cloudflare.com")
+        || host_matches_rule(host, "martinfowler.com")
+        || host_matches_rule(host, "blog.acolyer.org")
+        || host_matches_rule(host, "research.google")
+        || host_matches_rule(host, "blog.rust-lang.org")
+        || host_matches_rule(host, "simonwillison.net")
+        || host_matches_rule(host, "danluu.com")
+        || host_matches_rule(host, "rachelbythebay.com")
+        || host_matches_rule(host, "without.boats")
+        || host_matches_rule(host, "matklad.github.io")
+        || host_matches_rule(host, "thume.ca")
+        || host_matches_rule(host, "fly.io")
     {
-        default_days.max(90)
+        true
     } else {
-        default_days
+        false
+    }
+}
+
+pub fn recrawl_days_for_host(default_days: u64, host: &str) -> u64 {
+    if !host_is_high_quality(host) {
+        return u64::MAX;
+    }
+
+    if host_matches_rule(host, "developer.mozilla.org")
+        || host_matches_rule(host, "docs.python.org")
+        || host_matches_rule(host, "doc.rust-lang.org")
+        || host_matches_rule(host, "docs.rs")
+        || host_matches_rule(host, "go.dev")
+        || host_matches_rule(host, "pkg.go.dev")
+        || host_matches_rule(host, "kubernetes.io")
+        || host_matches_rule(host, "learn.microsoft.com")
+        || host_matches_rule(host, "docs.oracle.com")
+        || host_matches_rule(host, "docs.aws.amazon.com")
+        || host_matches_rule(host, "docs.docker.com")
+        || host_matches_rule(host, "docs.ansible.com")
+        || host_matches_rule(host, "prometheus.io")
+        || host_matches_rule(host, "opentelemetry.io")
+        || host_matches_rule(host, "www.kernel.org")
+        || host_matches_rule(host, "docs.kernel.org")
+        || host_matches_rule(host, "llvm.org")
+        || host_matches_rule(host, "clang.llvm.org")
+        || host_matches_rule(host, "gcc.gnu.org")
+        || host_matches_rule(host, "cppreference.com")
+        || host_matches_rule(host, "sqlite.org")
+        || host_matches_rule(host, "www.postgresql.org")
+    {
+        default_days.clamp(7, 30)
+    } else if host_matches_rule(host, "blog.cloudflare.com")
+        || host_matches_rule(host, "martinfowler.com")
+        || host_matches_rule(host, "blog.acolyer.org")
+        || host_matches_rule(host, "research.google")
+        || host_matches_rule(host, "blog.rust-lang.org")
+        || host_matches_rule(host, "simonwillison.net")
+        || host_matches_rule(host, "danluu.com")
+        || host_matches_rule(host, "rachelbythebay.com")
+        || host_matches_rule(host, "www.elastic.co")
+        || host_matches_rule(host, "fly.io")
+        || host_matches_rule(host, "www.cockroachlabs.com")
+        || host_matches_rule(host, "jepsen.io")
+        || host_matches_rule(host, "martin.kleppmann.com")
+        || host_matches_rule(host, "muratbuffalo.blogspot.com")
+        || host_matches_rule(host, "thume.ca")
+        || host_matches_rule(host, "interrupt.memfault.com")
+        || host_matches_rule(host, "blog.cryptographyengineering.com")
+        || host_matches_rule(host, "without.boats")
+        || host_matches_rule(host, "matklad.github.io")
+        || host_matches_rule(host, "eli.thegreenplace.net")
+        || host_matches_rule(host, "faultlore.com")
+    {
+        default_days.clamp(30, 90)
+    } else {
+        default_days.max(90)
     }
 }
 
@@ -214,29 +287,29 @@ pub fn domain_cap(host: &str) -> usize {
         "elixir-lang.org" => 5_000,
 
         // Tier A — Strong tech blogs
-        "stackoverflow.com" => 20_000,
+        "stackoverflow.com" => 8_000,
         "blog.cloudflare.com" => 10_000,
         "jvns.ca" => 5_000,
         "martinfowler.com" => 8_000,
         "blog.acolyer.org" => 8_000,
-        "eng.uber.com" => 8_000,
-        "netflixtechblog.com" => 8_000,
+        "eng.uber.com" => 4_000,
+        "netflixtechblog.com" => 4_000,
         "research.google" => 8_000,
         "blog.rust-lang.org" => 5_000,
-        "stackoverflow.blog" => 5_000,
+        "stackoverflow.blog" => 2_000,
         "simonwillison.net" => 5_000,
         "danluu.com" => 5_000,
         "rachelbythebay.com" => 5_000,
-        "engineering.fb.com" => 8_000,
-        "developers.googleblog.com" => 8_000,
-        "aws.amazon.com" => 8_000,
-        "explore.alas.aws.amazon.com" => 500,
-        "engineering.linkedin.com" => 8_000,
-        "slack.engineering" => 5_000,
-        "dropbox.tech" => 5_000,
-        "shopify.engineering" => 5_000,
-        "grafana.com" => 8_000,
-        "www.elastic.co" => 8_000,
+        "engineering.fb.com" => 4_000,
+        "developers.googleblog.com" => 4_000,
+        "aws.amazon.com" => 4_000,
+        "explore.alas.aws.amazon.com" => 200,
+        "engineering.linkedin.com" => 4_000,
+        "slack.engineering" => 3_000,
+        "dropbox.tech" => 3_000,
+        "shopify.engineering" => 3_000,
+        "grafana.com" => 5_000,
+        "www.elastic.co" => 6_000,
 
         // Tier A — Research & academic
         "arxiv.org" => 25_000,
@@ -265,16 +338,16 @@ pub fn domain_cap(host: &str) -> usize {
         "12factor.net" => 1_000,
         "highscalability.com" => 5_000,
 
-        // Tier B — Noisy/UGC (keep low)
-        "news.ycombinator.com" => 2_000,
-        "dev.to" => 3_000,
-        "medium.com" => 3_000,
-        "www.infoq.com" => 5_000,
-        "thenewstack.io" => 3_000,
-        "techcrunch.com" => 1_000,
-        "www.joelonsoftware.com" => 3_000,
-        "www.databricks.com" => 1_000,
-        "community.databricks.com" => 500,
+        // Tier B — Noisy/UGC (keep very low or effectively disabled)
+        "news.ycombinator.com" => 100,
+        "dev.to" => 100,
+        "medium.com" => 100,
+        "www.infoq.com" => 500,
+        "thenewstack.io" => 250,
+        "techcrunch.com" => 0,
+        "www.joelonsoftware.com" => 1_000,
+        "www.databricks.com" => 250,
+        "community.databricks.com" => 0,
 
         // Tier A — Niche high-quality
         "without.boats" => 3_000,
@@ -348,7 +421,6 @@ pub fn host_allowed(host: &str) -> bool {
         "developer.mozilla.org",
         "en.wikipedia.org",
         "stackoverflow.com",
-        "stackoverflow.blog",
         "cppreference.com",
         "en.cppreference.com",
         "blog.rust-lang.org",
@@ -356,8 +428,6 @@ pub fn host_allowed(host: &str) -> bool {
         "jvns.ca",
         "martinfowler.com",
         "blog.acolyer.org",
-        "eng.uber.com",
-        "netflixtechblog.com",
         "research.google",
         "docs.rs",
         "go.dev",
@@ -367,18 +437,7 @@ pub fn host_allowed(host: &str) -> bool {
         "docs.docker.com",
         "learn.microsoft.com",
         "docs.julialang.org",
-        "news.ycombinator.com",
-        "dev.to",
-        "medium.com",
-        "www.infoq.com",
-        "thenewstack.io",
         "highscalability.com",
-        "engineering.fb.com",
-        "aws.amazon.com",
-        "www.aws.amazon.com",
-        "docs.aws.amazon.com",
-        "developers.googleblog.com",
-        "techcrunch.com",
         "simonwillison.net",
         "www.joelonsoftware.com",
         "danluu.com",
@@ -406,7 +465,6 @@ pub fn host_allowed(host: &str) -> bool {
         "docs.oracle.com",
         "slack.engineering",
         "dropbox.tech",
-        "www.databricks.com",
         "grafana.com",
         "www.elastic.co",
         "shopify.engineering",
