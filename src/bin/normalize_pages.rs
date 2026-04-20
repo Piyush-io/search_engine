@@ -20,6 +20,10 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 const MAX_CHUNKS_PER_PAGE: usize = 220;
+const MAX_QUEUE_BATCH: usize = 20;
+const MAX_PAGE_RECORD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PAGE_TEXT_BYTES: usize = 500_000;
+const MAX_BLOCK_TEXT_BYTES: usize = 64_000;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -51,10 +55,22 @@ fn chunk_limit_for_page(page: &PageRecord) -> usize {
         .unwrap_or(MAX_CHUNKS_PER_PAGE)
 }
 
+fn clamp_utf8<'a>(s: &'a str, max_bytes: usize) -> &'a str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn build_chunks(cfg: &config::Config, page: &PageRecord, content_hash: &str) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut preceding_sentences: Vec<String> = Vec::new();
     let chunk_limit = chunk_limit_for_page(page);
+    let mut page_text_used = 0usize;
 
     let window_size = cfg.chunking.window_size;
     let window_overlap = cfg.chunking.window_overlap;
@@ -64,7 +80,18 @@ fn build_chunks(cfg: &config::Config, page: &PageRecord, content_hash: &str) -> 
             break;
         }
 
-        let sentences = sentencizer::split_sentences(&block.text);
+        if page_text_used >= MAX_PAGE_TEXT_BYTES {
+            break;
+        }
+
+        let remaining = MAX_PAGE_TEXT_BYTES - page_text_used;
+        let block_text = clamp_utf8(&block.text, MAX_BLOCK_TEXT_BYTES.min(remaining));
+        if block_text.trim().is_empty() {
+            continue;
+        }
+        page_text_used += block_text.len();
+
+        let sentences = sentencizer::split_sentences(block_text);
         let windows = sentencizer::merge_windows(&sentences, window_size, window_overlap);
 
         for window_text in windows {
@@ -132,7 +159,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let mut batch = Vec::new();
-        for item in db.iterator_cf(norm_queue_cf, IteratorMode::Start).take(100) {
+        for item in db
+            .iterator_cf(norm_queue_cf, IteratorMode::Start)
+            .take(MAX_QUEUE_BATCH)
+        {
             let (key, _) = item?;
             batch.push(key.to_vec());
         }
@@ -142,17 +172,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        let mut wb = WriteBatch::default();
         let mut processed_in_batch = 0usize;
 
         for url_bytes in &batch {
+            let mut wb = WriteBatch::default();
             let Some(page_data) = db.get_cf(content_cf, url_bytes)? else {
                 wb.delete_cf(norm_queue_cf, url_bytes);
+                db.write(wb)?;
+                processed_in_batch += 1;
                 continue;
             };
 
+            if page_data.len() > MAX_PAGE_RECORD_BYTES {
+                eprintln!(
+                    "[normalize] skipping oversized page record ({} bytes)",
+                    page_data.len()
+                );
+                wb.delete_cf(norm_queue_cf, url_bytes);
+                db.write(wb)?;
+                processed_in_batch += 1;
+                continue;
+            }
+
             let Ok(page) = serde_json::from_slice::<PageRecord>(&page_data) else {
                 wb.delete_cf(norm_queue_cf, url_bytes);
+                db.write(wb)?;
+                processed_in_batch += 1;
                 continue;
             };
 
@@ -166,6 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_some_and(|state| state.content_hash == content_hash)
             {
                 wb.delete_cf(norm_queue_cf, url_bytes);
+                db.write(wb)?;
                 processed_in_batch += 1;
                 continue;
             }
@@ -227,10 +273,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             wb.put_cf(page_state_cf, url_bytes, serde_json::to_vec(&page_state)?);
             wb.delete_cf(norm_queue_cf, url_bytes);
+            db.write(wb)?;
             processed_in_batch += 1;
         }
-
-        db.write(wb)?;
         let total = count.fetch_add(processed_in_batch, Ordering::SeqCst) + processed_in_batch;
 
         if last_report.elapsed() >= Duration::from_secs(5) {
