@@ -1,0 +1,10 @@
+q1	what does wal_level logical enable
+q2	sqlite wal checkpoint truncate behavior
+q3	postgres serializable isolation anomaly prevention
+q4	difference between repeatable read and serializable postgres
+q5	what is full_page_writes in postgres wal
+q6	sqlite locking states shared reserved pending exclusive
+q7	mvcc snapshot visibility postgres
+q8	vacuum freeze xid wraparound
+q9	postgres wal vs checkpoint
+q10	what is a dirty read and does postgres allow it

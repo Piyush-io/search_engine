@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use search_engine::eval::{compute_metrics, load_qrels, load_queries};
+use search_engine::eval::{canonical_doc_key, compute_metrics, load_qrels, load_queries};
 
 use search_engine::{
     config,
@@ -63,7 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             top_k,
             &cfg.ranking,
         );
-        let doc_ids: Vec<String> = results.iter().map(|r| r.source_url.clone()).collect();
+        let doc_ids: Vec<String> = results
+            .iter()
+            .map(|r| canonical_doc_key(&r.source_url))
+            .collect();
         ranked_lists.insert(query_id.clone(), doc_ids);
     }
 

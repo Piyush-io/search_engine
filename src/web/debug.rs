@@ -7,7 +7,7 @@ use url::Url;
 use crate::{
     ScoredHit,
     config::RankingConfig,
-    eval::{Qrel, compute_metrics, load_qrels, load_queries},
+    eval::{Qrel, canonical_doc_key, compute_metrics, load_qrels, load_queries},
     search::{self, lexical::LexicalIndex, vector_index::VectorIndex},
 };
 
@@ -247,7 +247,10 @@ pub fn run_debug_evaluation(
 
     for (query_id, query_text) in &queries {
         let results = search::query::run_query(db, index, lexical, query_text, top_k, ranking);
-        let ranked: Vec<String> = results.iter().map(|result| result.source_url.clone()).collect();
+        let ranked: Vec<String> = results
+            .iter()
+            .map(|result| canonical_doc_key(&result.source_url))
+            .collect();
         ranked_lists.insert(query_id.clone(), ranked.clone());
 
         let judged = match qrels.get(query_id) {

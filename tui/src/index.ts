@@ -117,15 +117,15 @@ type DebugQueryEvalRow = {
 }
 
 const palette = {
-  canvas: "#08111f",
-  panel: "#0f1b31",
-  panelAlt: "#132441",
-  border: "#274060",
-  borderFocus: "#63cdda",
-  text: "#ecf4ff",
-  muted: "#98acc5",
-  accent: "#63cdda",
-  warm: "#f6ad55",
+  canvas: "#0B0B0B",
+  panel: "#111111",
+  panelAlt: "#161628",
+  border: "#2B396D",
+  borderFocus: "#4a5a9d",
+  selection: "#2B396D",
+  text: "#E4E4E4",
+  muted: "#9090a0",
+  accent: "#E4E4E4",
   danger: "#ff8a5b",
   success: "#7bd389",
 }
@@ -236,10 +236,10 @@ const resultsList = new SelectRenderable(renderer, {
   focusedBackgroundColor: palette.panelAlt,
   textColor: palette.text,
   focusedTextColor: palette.text,
-  selectedBackgroundColor: palette.borderFocus,
-  selectedTextColor: palette.canvas,
+  selectedBackgroundColor: palette.selection,
+  selectedTextColor: palette.text,
   descriptionColor: palette.muted,
-  selectedDescriptionColor: palette.canvas,
+  selectedDescriptionColor: palette.text,
   showDescription: true,
   showScrollIndicator: true,
   wrapSelection: true,
@@ -293,7 +293,17 @@ const summaryPane = new BoxRenderable(renderer, {
   borderColor: palette.border,
   title: "Query summary",
   backgroundColor: palette.panel,
-  padding: 1,
+})
+const summaryScroll = new ScrollBoxRenderable(renderer, {
+  id: "summary-scroll",
+  flexGrow: 1,
+  scrollY: true,
+  scrollX: false,
+  contentOptions: {
+    flexDirection: "column",
+    padding: 1,
+    backgroundColor: palette.panel,
+  },
 })
 const summaryText = new TextRenderable(renderer, {
   id: "summary-text",
@@ -301,7 +311,8 @@ const summaryText = new TextRenderable(renderer, {
   wrapMode: "word",
   fg: palette.text,
 })
-summaryPane.add(summaryText)
+summaryScroll.add(summaryText)
+summaryPane.add(summaryScroll)
 
 const evalPane = new BoxRenderable(renderer, {
   id: "eval-pane",
@@ -364,17 +375,17 @@ app.add(queryBox)
 app.add(bodyRow)
 app.add(footerBox)
 
-const focusRing = [queryInput, resultsList, detailScroll]
+const focusRing = [queryInput, resultsList, detailScroll, evalScroll]
 let focusIndex = 0
 let currentSearch: DebugSearchResponse | null = null
 let currentEval: DebugEvalResponse | null = null
-let currentStatus = "idle"
 let searchSequence = 0
 let evalSequence = 0
+let searchAbort: AbortController | null = null
+let evalAbort: AbortController | null = null
 
 function setStatus(message: string): void {
-  currentStatus = message
-  headerStatus.content = `${message} | ${apiBase} | ${configPath}`
+  headerStatus.content = `${message} | ${configPath}`
 }
 
 function resizePanels(width: number): void {
@@ -569,7 +580,7 @@ function applySelection(option: SelectOption | null): void {
   detailScroll.scrollTop = 0
 }
 
-async function fetchJson<T>(path: string, params: Record<string, string>): Promise<T> {
+async function fetchJson<T>(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<T> {
   const url = new URL(path, apiBase)
   for (const [key, value] of Object.entries(params)) {
     if (value.trim().length > 0) {
@@ -577,9 +588,10 @@ async function fetchJson<T>(path: string, params: Record<string, string>): Promi
     }
   }
 
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(120_000),
-  })
+  const timeout = AbortSignal.timeout(120_000)
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
+
+  const response = await fetch(url, { signal: combined })
 
   if (!response.ok) {
     const body = await response.text()
@@ -592,31 +604,43 @@ async function fetchJson<T>(path: string, params: Record<string, string>): Promi
 async function runSearch(query: string): Promise<void> {
   const trimmed = query.trim()
   if (!trimmed) {
+    setStatus("enter a query")
     return
   }
 
+  searchAbort?.abort()
+  searchAbort = new AbortController()
+  const { signal } = searchAbort
+
   const seq = ++searchSequence
-  setStatus(`searching \"${trimmed}\"`)
+  setStatus(`searching "${trimmed}"`)
   summaryText.content = "Running retrieval..."
+  headerStatus.fg = palette.muted
 
   try {
     const response = await fetchJson<DebugSearchResponse>("/debug/api/search", {
       q: trimmed,
       k: "10",
-    })
+    }, signal)
     if (seq !== searchSequence) {
       return
     }
     queryInput.value = trimmed
     applySearch(response)
+    headerStatus.fg = palette.success
     setStatus(`ready | ${response.elapsed_ms} ms | ${response.result_count} hits`)
   } catch (error) {
-    if (seq !== searchSequence) {
+    if (signal.aborted || seq !== searchSequence) {
       return
     }
     const message = error instanceof Error ? error.message : String(error)
+    currentSearch = null
+    resultsList.options = []
+    resultsPane.title = "Ranking | 0 hits"
     detailText.content = `Search failed.\n\n${message}`
-    summaryText.content = `Search failed.\n\n${message}`
+    detailPane.title = "Chunk detail"
+    summaryText.content = ""
+    headerStatus.fg = palette.danger
     setStatus("search failed")
   }
 }
@@ -665,7 +689,7 @@ resultsList.on(SelectRenderableEvents.SELECTION_CHANGED, (_index: number, option
 
 resultsList.on(SelectRenderableEvents.ITEM_SELECTED, () => {
   focusRing[focusIndex]?.blur()
-  focusIndex = 2
+  focusIndex = focusRing.indexOf(detailScroll)
   detailScroll.focus()
 })
 

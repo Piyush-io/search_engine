@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
+use super::url_match::canonical_doc_key;
+
 pub struct Qrel {
     pub query_id: String,
     pub doc_id: String,
@@ -24,7 +26,7 @@ pub fn load_qrels(path: &str) -> Result<HashMap<String, Vec<Qrel>>, Box<dyn std:
             continue;
         }
         let query_id = parts[0].to_string();
-        let doc_id = parts[2].to_string();
+        let doc_id = canonical_doc_key(parts[2]);
         let relevance: u32 = match parts[3].parse() {
             Ok(v) => v,
             Err(_) => continue,

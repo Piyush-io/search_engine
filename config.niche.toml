@@ -27,6 +27,45 @@ window_size = 3
 window_overlap = 1
 
 [ranking]
+short_vec_weight = 0.20
+short_lex_weight = 0.45
+short_title_weight = 0.18
+short_heading_weight = 0.12
+short_body_weight = 0.05
+
+long_vec_weight = 0.28
+long_lex_weight = 0.32
+long_title_weight = 0.16
+long_heading_weight = 0.14
+long_body_weight = 0.10
+
+exact_heading_boost = 0.22
+exact_body_boost = 0.10
+no_heading_penalty = 0.70
+weak_heading_penalty = 0.85
+
+authority_bonus = 0.06
+authority_min_lexical_score = 0.15
+authority_min_structural_overlap = 0.20
+
+rrf_k = 60.0
+short_rrf_vec_weight = 0.55
+short_rrf_lex_weight = 2.00
+long_rrf_vec_weight = 0.90
+long_rrf_lex_weight = 1.20
+
+score_floor_fraction = 0.08
+score_floor_min = 0.06
+host_cap_divisor = 2
+host_cap_min = 3
+host_cap_max = 6
+
+lexical_only_fallback_enabled = true
+lexical_only_pool_mult = 20
+lexical_only_pool_cap = 1000
+lexical_relaxed_fallback_enabled = true
+lexical_relaxed_min_hits = 4
+lexical_relaxed_extra_k = 200
 
 [rocksdb]
 block_cache_mb = 256

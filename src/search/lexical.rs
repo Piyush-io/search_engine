@@ -209,6 +209,9 @@ impl LexicalIndex {
         &self,
         query_text: &str,
         k: usize,
+        relaxed_fallback_enabled: bool,
+        relaxed_min_hits: usize,
+        relaxed_extra_k: usize,
     ) -> Result<Vec<(ChunkId, f32)>, Box<dyn std::error::Error>> {
         if k == 0 {
             return Ok(Vec::new());
@@ -223,7 +226,7 @@ impl LexicalIndex {
             default_fields.push(section_field);
         }
 
-        let mut parser = QueryParser::for_index(&self.index, default_fields);
+        let mut parser = QueryParser::for_index(&self.index, default_fields.clone());
         parser.set_conjunction_by_default();
         if let Some(title_field) = self.title_field {
             parser.set_field_boost(title_field, 4.0);
@@ -234,10 +237,12 @@ impl LexicalIndex {
         parser.set_field_boost(self.heading_field, 2.5);
         parser.set_field_boost(self.text_field, 1.0);
         parser.set_field_boost(self.source_url_field, 0.2);
-        let q = parser.parse_query(&self.build_query(query_text))?;
+        let query = self.build_query(query_text);
+        let q = parser.parse_query(&query)?;
 
         let top = searcher.search(&q, &TopDocs::with_limit(k))?;
         let mut out = Vec::with_capacity(top.len());
+        let mut seen = std::collections::HashSet::new();
 
         for (score, addr) in top {
             let doc: tantivy::TantivyDocument = searcher.doc(addr)?;
@@ -247,7 +252,43 @@ impl LexicalIndex {
             let Some(id) = val.as_str() else {
                 continue;
             };
-            out.push((id.to_string(), score));
+            let id = id.to_string();
+            if seen.insert(id.clone()) {
+                out.push((id, score));
+            }
+        }
+
+        if relaxed_fallback_enabled && out.len() < relaxed_min_hits && out.len() < k {
+            let relaxed_limit = (k + relaxed_extra_k).max(k);
+            let mut parser = QueryParser::for_index(&self.index, default_fields);
+            if let Some(title_field) = self.title_field {
+                parser.set_field_boost(title_field, 4.0);
+            }
+            if let Some(section_field) = self.section_field {
+                parser.set_field_boost(section_field, 3.0);
+            }
+            parser.set_field_boost(self.heading_field, 2.5);
+            parser.set_field_boost(self.text_field, 1.0);
+            parser.set_field_boost(self.source_url_field, 0.2);
+            let q = parser.parse_query(&query)?;
+
+            let relaxed_top = searcher.search(&q, &TopDocs::with_limit(relaxed_limit))?;
+            for (score, addr) in relaxed_top {
+                if out.len() >= k {
+                    break;
+                }
+                let doc: tantivy::TantivyDocument = searcher.doc(addr)?;
+                let Some(val) = doc.get_first(self.chunk_id_field) else {
+                    continue;
+                };
+                let Some(id) = val.as_str() else {
+                    continue;
+                };
+                let id = id.to_string();
+                if seen.insert(id.clone()) {
+                    out.push((id, score));
+                }
+            }
         }
 
         Ok(out)

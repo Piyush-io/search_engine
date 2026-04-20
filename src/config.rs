@@ -92,6 +92,36 @@ pub struct RankingConfig {
     pub short_rrf_vec_weight: f32,
     #[serde(default = "default_short_rrf_lex_weight")]
     pub short_rrf_lex_weight: f32,
+    #[serde(default = "default_long_rrf_vec_weight")]
+    pub long_rrf_vec_weight: f32,
+    #[serde(default = "default_long_rrf_lex_weight")]
+    pub long_rrf_lex_weight: f32,
+    #[serde(default = "default_score_floor_fraction")]
+    pub score_floor_fraction: f32,
+    #[serde(default = "default_score_floor_min")]
+    pub score_floor_min: f32,
+    #[serde(default = "default_host_cap_divisor")]
+    pub host_cap_divisor: usize,
+    #[serde(default = "default_host_cap_min")]
+    pub host_cap_min: usize,
+    #[serde(default = "default_host_cap_max")]
+    pub host_cap_max: usize,
+    #[serde(default = "default_authority_min_lexical_score")]
+    pub authority_min_lexical_score: f32,
+    #[serde(default = "default_authority_min_structural_overlap")]
+    pub authority_min_structural_overlap: f32,
+    #[serde(default = "default_lexical_only_fallback_enabled")]
+    pub lexical_only_fallback_enabled: bool,
+    #[serde(default = "default_lexical_only_pool_mult")]
+    pub lexical_only_pool_mult: usize,
+    #[serde(default = "default_lexical_only_pool_cap")]
+    pub lexical_only_pool_cap: usize,
+    #[serde(default = "default_lexical_relaxed_fallback_enabled")]
+    pub lexical_relaxed_fallback_enabled: bool,
+    #[serde(default = "default_lexical_relaxed_min_hits")]
+    pub lexical_relaxed_min_hits: usize,
+    #[serde(default = "default_lexical_relaxed_extra_k")]
+    pub lexical_relaxed_extra_k: usize,
 }
 
 fn default_short_vec_weight() -> f32 {
@@ -147,6 +177,51 @@ fn default_short_rrf_vec_weight() -> f32 {
 }
 fn default_short_rrf_lex_weight() -> f32 {
     1.8
+}
+fn default_long_rrf_vec_weight() -> f32 {
+    1.0
+}
+fn default_long_rrf_lex_weight() -> f32 {
+    1.0
+}
+fn default_score_floor_fraction() -> f32 {
+    0.15
+}
+fn default_score_floor_min() -> f32 {
+    0.12
+}
+fn default_host_cap_divisor() -> usize {
+    4
+}
+fn default_host_cap_min() -> usize {
+    2
+}
+fn default_host_cap_max() -> usize {
+    3
+}
+fn default_authority_min_lexical_score() -> f32 {
+    0.15
+}
+fn default_authority_min_structural_overlap() -> f32 {
+    0.20
+}
+fn default_lexical_only_fallback_enabled() -> bool {
+    true
+}
+fn default_lexical_only_pool_mult() -> usize {
+    20
+}
+fn default_lexical_only_pool_cap() -> usize {
+    1_000
+}
+fn default_lexical_relaxed_fallback_enabled() -> bool {
+    true
+}
+fn default_lexical_relaxed_min_hits() -> usize {
+    4
+}
+fn default_lexical_relaxed_extra_k() -> usize {
+    200
 }
 
 #[derive(Debug, Clone, Deserialize)]

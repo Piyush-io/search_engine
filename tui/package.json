@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "tui": "tsx src/index.ts",
+    "tui": "bun src/index.ts",
     "check": "tsc --noEmit"
   },
   "dependencies": {

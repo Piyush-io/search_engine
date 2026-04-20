@@ -95,17 +95,29 @@ pub fn run_query(
     ranking: &RankingConfig,
 ) -> Vec<ScoredHit> {
     let query_vec = match client::embed_query(query_text) {
-        Ok(v) => v,
+        Ok(v) => Some(v),
         Err(e) => {
             eprintln!("[query] embedding failed: {e}");
-            return Vec::new();
+            None
         }
     };
 
-    let vec_pool_k = (k.saturating_mul(100)).clamp(k, 2_000);
-    let lex_pool_k = (k.saturating_mul(40)).clamp(k, 1_000);
+    if query_vec.is_none() && (!ranking.lexical_only_fallback_enabled || lexical.is_none()) {
+        return Vec::new();
+    }
 
-    let vector_hits = index.search(&query_vec, vec_pool_k);
+    let vec_pool_k = (k.saturating_mul(100)).clamp(k, 2_000);
+    let lex_pool_k = if query_vec.is_some() {
+        (k.saturating_mul(40)).clamp(k, 1_000)
+    } else {
+        let cap = ranking.lexical_only_pool_cap.max(k);
+        (k.saturating_mul(ranking.lexical_only_pool_mult.max(1))).clamp(k, cap)
+    };
+
+    let vector_hits = query_vec
+        .as_ref()
+        .map(|query_vec| index.search(query_vec, vec_pool_k))
+        .unwrap_or_default();
 
     let query_tokens = tokenize_set(query_text);
     let short_query = query_tokens.len() <= 5;
@@ -113,8 +125,21 @@ pub fn run_query(
     let expanded_query = build_expanded_query_text(query_text, &query_tokens);
 
     let lexical_hits = lexical
-        .and_then(|lx| lx.search(&expanded_query, lex_pool_k).ok())
+        .and_then(|lx| {
+            lx.search(
+                &expanded_query,
+                lex_pool_k,
+                ranking.lexical_relaxed_fallback_enabled && query_vec.is_none(),
+                ranking.lexical_relaxed_min_hits,
+                ranking.lexical_relaxed_extra_k,
+            )
+            .ok()
+        })
         .unwrap_or_default();
+
+    if query_vec.is_none() && lexical_hits.is_empty() {
+        return Vec::new();
+    }
 
     let fused_ids = rrf_fuse_ids(&vector_hits, &lexical_hits, 2_000, short_query, ranking);
     let vec_scores = normalize_scores(&vector_hits);
@@ -183,8 +208,15 @@ pub fn run_query(
                     rerank_score *= ranking.weak_heading_penalty;
                 }
 
-                let auth_bonus = if let Some(host) = url_host(&chunk.source_url) {
-                    domain_authority_bonus(&query_tokens, &host, ranking.authority_bonus)
+                let structural_signal = title_overlap.max(heading_overlap);
+                let auth_bonus = if lex_score >= ranking.authority_min_lexical_score
+                    || structural_signal >= ranking.authority_min_structural_overlap
+                {
+                    if let Some(host) = url_host(&chunk.source_url) {
+                        domain_authority_bonus(&query_tokens, &host, ranking.authority_bonus)
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 };
@@ -215,9 +247,9 @@ pub fn run_query(
     candidates.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
 
     let score_floor = if let Some(top) = candidates.first() {
-        (top.final_score * 0.15).max(0.12)
+        (top.final_score * ranking.score_floor_fraction).max(ranking.score_floor_min)
     } else {
-        0.12
+        ranking.score_floor_min
     };
     candidates.retain(|c| c.final_score >= score_floor);
 
@@ -225,7 +257,10 @@ pub fn run_query(
     let mut seen_url_keys = HashSet::new();
     let mut seen_text_tokens = Vec::new();
     let mut per_host: HashMap<String, usize> = HashMap::new();
-    let host_cap = (k / 4).clamp(2, 3);
+    let host_cap = (k / ranking.host_cap_divisor.max(1)).clamp(
+        ranking.host_cap_min.max(1),
+        ranking.host_cap_max.max(ranking.host_cap_min.max(1)),
+    );
 
     fill_results(
         &mut selected,
@@ -271,7 +306,7 @@ fn rrf_fuse_ids(
     let (vec_weight, lex_weight) = if short_query {
         (ranking.short_rrf_vec_weight, ranking.short_rrf_lex_weight)
     } else {
-        (1.0_f32, 1.0_f32)
+        (ranking.long_rrf_vec_weight, ranking.long_rrf_lex_weight)
     };
 
     for (rank, (id, _)) in vector_hits.iter().enumerate() {
@@ -577,6 +612,18 @@ fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str, bonus: f32
         ("linux", &["kernel.org", "man7.org"]),
         ("git", &["git-scm.com"]),
         ("sql", &["www.postgresql.org", "dev.mysql.com"]),
+        (
+            "postgres",
+            &["www.postgresql.org", "postgresql.org", "wiki.postgresql.org"],
+        ),
+        (
+            "postgresql",
+            &["www.postgresql.org", "postgresql.org", "wiki.postgresql.org"],
+        ),
+        ("sqlite", &["sqlite.org", "www.sqlite.org"]),
+        ("wal", &["www.postgresql.org", "postgresql.org", "sqlite.org"]),
+        ("mvcc", &["www.postgresql.org", "postgresql.org"]),
+        ("xid", &["www.postgresql.org", "postgresql.org"]),
         ("http", &["developer.mozilla.org", "httpwg.org"]),
         ("css", &["developer.mozilla.org"]),
         ("html", &["developer.mozilla.org"]),
@@ -585,11 +632,14 @@ fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str, bonus: f32
         ("cpp", &["en.cppreference.com"]),
     ];
 
+    let host = canonical_host(host);
+
     for (keyword, canonical_hosts) in AUTHORITY {
         if query_tokens.contains(*keyword) {
             if canonical_hosts
                 .iter()
-                .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+                .map(|h| canonical_host(h))
+                .any(|h| host == h || host.ends_with(&format!(".{h}")))
             {
                 return bonus;
             }
@@ -634,5 +684,12 @@ mod tests {
             canonical_url_key("https://doc.rust-lang.org/stable/reference/lifetime-elision.html"),
             canonical_url_key("https://docs.rust-lang.org/nightly/reference/lifetime-elision.html"),
         );
+    }
+
+    #[test]
+    fn authority_bonus_matches_normalized_hosts() {
+        let mut tokens = std::collections::HashSet::new();
+        tokens.insert("typescript".to_string());
+        assert!(super::domain_authority_bonus(&tokens, "www.typescriptlang.org", 0.5) > 0.0);
     }
 }
