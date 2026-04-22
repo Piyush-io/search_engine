@@ -6,31 +6,33 @@ recrawl_days = 30
 
 [embedding]
 backend = "cuda"
-model = "bge-small-en-v1.5"
-dim = 384
-batch_size = 64
-max_length = 128
-bulk_workers = 1
+model = "bge-base-en-v1.5"
+dim = 768
+batch_size = 32
+max_length = 384
+bulk_workers = 4
 bulk_intra_threads = 2
+# Uncomment to offload embedding inference to a remote GPU embed_server:
+remote_url = "http://192.168.1.15:3001"
 
 [hnsw]
 backend = "hnsw"
 shards = 1
-m = 8
-ef_construction = 80
-ef_search = 120
-max_elements = 2_000_000
+m = 16
+ef_construction = 200
+ef_search = 150
+max_elements = 4_000_000
 
 [chunking]
-context_depth = 3
+context_depth = 5
 window_size = 3
 window_overlap = 1
 
 [ranking]
-short_vec_weight = 0.20
-short_lex_weight = 0.45
-short_title_weight = 0.18
-short_heading_weight = 0.12
+short_vec_weight = 0.15
+short_lex_weight = 0.52
+short_title_weight = 0.20
+short_heading_weight = 0.13
 short_body_weight = 0.05
 
 long_vec_weight = 0.28
@@ -39,18 +41,40 @@ long_title_weight = 0.16
 long_heading_weight = 0.14
 long_body_weight = 0.10
 
-exact_heading_boost = 0.22
-exact_body_boost = 0.10
-no_heading_penalty = 0.70
-weak_heading_penalty = 0.85
+exact_heading_boost = 0.30
+exact_body_boost = 0.15
+no_heading_penalty = 0.80
+weak_heading_penalty = 0.92
 
-authority_bonus = 0.06
-authority_min_lexical_score = 0.15
-authority_min_structural_overlap = 0.20
+authority_bonus = 0.15
+authority_min_lexical_score = 0.10
+authority_min_structural_overlap = 0.10
 
-rrf_k = 60.0
-short_rrf_vec_weight = 0.55
-short_rrf_lex_weight = 2.00
+host_allowlist_boost = 1.40
+host_soft_penalty = 0.70
+host_hard_cap = 5
+host_allowlist = [
+    "www.postgresql.org",
+    "postgresql.org",
+    "wiki.postgresql.org",
+    "sqlite.org",
+    "www.sqlite.org",
+    "developer.mozilla.org",
+    "docs.python.org",
+    "doc.rust-lang.org",
+    "en.cppreference.com",
+]
+host_penalty_list = [
+    "stackoverflow.com",
+    "reddit.com",
+    "medium.com",
+    "dev.to",
+    "github.com",
+]
+
+rrf_k = 30.0
+short_rrf_vec_weight = 0.35
+short_rrf_lex_weight = 2.60
 long_rrf_vec_weight = 0.90
 long_rrf_lex_weight = 1.20
 
@@ -66,6 +90,10 @@ lexical_only_pool_cap = 1000
 lexical_relaxed_fallback_enabled = true
 lexical_relaxed_min_hits = 4
 lexical_relaxed_extra_k = 200
+
+rerank_enabled = true
+rerank_pool_size = 20
+rerank_blend_weight = 0.20
 
 [rocksdb]
 block_cache_mb = 256
