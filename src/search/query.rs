@@ -4,10 +4,11 @@ use rocksdb::DB;
 use url::Url;
 
 use crate::{
+    Chunk, ChunkId, ScoredHit,
     config::RankingConfig,
     embeddings::client,
     search::{lexical::LexicalIndex, vector_index::VectorIndex},
-    storage, Chunk, ChunkId, ScoredHit,
+    storage,
 };
 
 const SYNONYMS: &[(&[&str], &[&str])] = &[
@@ -33,6 +34,30 @@ const SYNONYMS: &[(&[&str], &[&str])] = &[
     (&["async"], &["asynchronous"]),
     (&["sync"], &["synchronous"]),
 ];
+
+/// Detect queries that look like technical identifiers (config keys, acronyms,
+/// namespace paths). These queries benefit from exact lexical matching and are
+/// often hurt by semantic reranking that boosts conceptual similarity over
+/// token-level precision.
+fn is_identifier_query(query_text: &str) -> bool {
+    let lower = query_text.to_lowercase();
+    // Contains underscore (e.g. wal_level, full_page_writes)
+    if lower.contains('_') {
+        return true;
+    }
+    // Contains namespace separator (e.g. std::vector, pg_catalog::pg_class)
+    if lower.contains("::") {
+        return true;
+    }
+    // Contains a short all-caps acronym (e.g. WAL, LSN, XID, CID)
+    for word in lower.split_whitespace() {
+        let clean: String = word.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+        if clean.len() >= 2 && clean.len() <= 5 && clean.chars().all(|c| c.is_ascii_uppercase()) {
+            return true;
+        }
+    }
+    false
+}
 
 fn expand_query_tokens(tokens: &HashSet<String>) -> HashSet<String> {
     let mut expanded = tokens.clone();
@@ -86,6 +111,30 @@ struct Candidate {
     query_token_count: usize,
 }
 
+#[derive(Default, Debug)]
+pub struct SearchDiagnostics {
+    pub vector_candidates: usize,
+    pub lexical_candidates: usize,
+    pub fused_candidates: usize,
+    pub final_selected: usize,
+}
+
+pub fn run_query_with_diagnostics(
+    db: &DB,
+    index: &dyn VectorIndex,
+    lexical: Option<&LexicalIndex>,
+    query_text: &str,
+    k: usize,
+    ranking: &RankingConfig,
+    diagnostics: Option<&mut SearchDiagnostics>,
+) -> Vec<ScoredHit> {
+    let results = run_query(db, index, lexical, query_text, k, ranking);
+    if let Some(d) = diagnostics {
+        d.final_selected = results.len();
+    }
+    results
+}
+
 pub fn run_query(
     db: &DB,
     index: &dyn VectorIndex,
@@ -106,9 +155,9 @@ pub fn run_query(
         return Vec::new();
     }
 
-    let vec_pool_k = (k.saturating_mul(100)).clamp(k, 2_000);
+    let vec_pool_k = (k.saturating_mul(40)).clamp(k, 1_600);
     let lex_pool_k = if query_vec.is_some() {
-        (k.saturating_mul(40)).clamp(k, 1_000)
+        (k.saturating_mul(20)).clamp(k, 800)
     } else {
         let cap = ranking.lexical_only_pool_cap.max(k);
         (k.saturating_mul(ranking.lexical_only_pool_mult.max(1))).clamp(k, cap)
@@ -121,6 +170,7 @@ pub fn run_query(
 
     let query_tokens = tokenize_set(query_text);
     let short_query = query_tokens.len() <= 5;
+    let identifier_query = is_identifier_query(query_text);
     let expanded_tokens = expand_query_tokens(&query_tokens);
     let expanded_query = build_expanded_query_text(query_text, &query_tokens);
 
@@ -202,10 +252,14 @@ pub fn run_query(
                     rerank_score += ranking.exact_body_boost;
                 }
 
-                if short_query && title_overlap == 0.0 && heading_overlap == 0.0 {
-                    rerank_score *= ranking.no_heading_penalty;
-                } else if short_query && title_overlap == 0.0 && heading_overlap < 0.34 {
-                    rerank_score *= ranking.weak_heading_penalty;
+                // Skip heading-match penalties for identifier queries — the
+                // identifier token itself may not appear in any heading.
+                if !identifier_query {
+                    if short_query && title_overlap == 0.0 && heading_overlap == 0.0 {
+                        rerank_score *= ranking.no_heading_penalty;
+                    } else if short_query && title_overlap == 0.0 && heading_overlap < 0.34 {
+                        rerank_score *= ranking.weak_heading_penalty;
+                    }
                 }
 
                 let structural_signal = title_overlap.max(heading_overlap);
@@ -221,6 +275,23 @@ pub fn run_query(
                     0.0
                 };
                 rerank_score += auth_bonus;
+
+                // Host allowlist / penalty multipliers
+                if let Some(host) = url_host(&chunk.source_url) {
+                    let host_lower = host.to_ascii_lowercase();
+                    if ranking.host_allowlist.iter().any(|h| {
+                        let h = h.to_ascii_lowercase();
+                        host_lower == h || host_lower.ends_with(&format!(".{h}"))
+                    }) {
+                        rerank_score *= ranking.host_allowlist_boost;
+                    }
+                    if ranking.host_penalty_list.iter().any(|h| {
+                        let h = h.to_ascii_lowercase();
+                        host_lower == h || host_lower.ends_with(&format!(".{h}"))
+                    }) {
+                        rerank_score *= ranking.host_soft_penalty;
+                    }
+                }
 
                 candidates.push(Candidate {
                     chunk_id: chunk.id,
@@ -244,6 +315,13 @@ pub fn run_query(
         }
     }
 
+    // Optional cross-encoder reranking on top heuristic candidates.
+    // Skip reranking for identifier queries where token-level exactness matters
+    // more than semantic similarity.
+    if ranking.rerank_enabled && !identifier_query {
+        apply_reranker(query_text, &mut candidates, ranking);
+    }
+
     candidates.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
 
     let score_floor = if let Some(top) = candidates.first() {
@@ -257,10 +335,14 @@ pub fn run_query(
     let mut seen_url_keys = HashSet::new();
     let mut seen_text_tokens = Vec::new();
     let mut per_host: HashMap<String, usize> = HashMap::new();
-    let host_cap = (k / ranking.host_cap_divisor.max(1)).clamp(
-        ranking.host_cap_min.max(1),
-        ranking.host_cap_max.max(ranking.host_cap_min.max(1)),
-    );
+    let host_cap = if let Some(hard_cap) = ranking.host_hard_cap {
+        hard_cap.max(1)
+    } else {
+        (k / ranking.host_cap_divisor.max(1)).clamp(
+            ranking.host_cap_min.max(1),
+            ranking.host_cap_max.max(ranking.host_cap_min.max(1)),
+        )
+    };
 
     fill_results(
         &mut selected,
@@ -561,7 +643,9 @@ fn canonical_host(host: &str) -> String {
     if matches!(host.as_str(), "doc.rust-lang.org" | "docs.rust-lang.org") {
         return "doc.rust-lang.org".to_string();
     }
-    host.strip_prefix("www.").unwrap_or(host.as_str()).to_string()
+    host.strip_prefix("www.")
+        .unwrap_or(host.as_str())
+        .to_string()
 }
 
 fn canonical_url_key(url: &str) -> String {
@@ -601,6 +685,69 @@ fn url_host(url: &str) -> Option<String> {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
+fn apply_reranker(query: &str, candidates: &mut [Candidate], ranking: &RankingConfig) {
+    let pool_size = ranking.rerank_pool_size.max(5).min(candidates.len());
+    if pool_size == 0 {
+        return;
+    }
+
+    // Sort temporarily to pick top heuristic candidates
+    candidates.sort_by(|a, b| b.final_score.total_cmp(&a.final_score));
+
+    let top_candidates: Vec<usize> = (0..pool_size).collect();
+    let documents: Vec<String> = top_candidates
+        .iter()
+        .map(|&i| {
+            let c = &candidates[i];
+            if c.heading_chain.is_empty() {
+                c.text.clone()
+            } else {
+                format!("{}\n{}", c.heading_chain.join(" > "), c.text)
+            }
+        })
+        .collect();
+
+    let (scores, indices) = match client::rerank(query, &documents, pool_size) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("[query] rerank failed: {e}");
+            return;
+        }
+    };
+
+    if scores.len() != pool_size || indices.len() != pool_size {
+        eprintln!(
+            "[query] rerank returned {} scores / {} indices for {pool_size} docs",
+            scores.len(),
+            indices.len()
+        );
+        return;
+    }
+
+    // Min-max normalize reranker scores to [0, 1]
+    let min_score = scores.iter().copied().fold(f32::INFINITY, f32::min);
+    let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let range = max_score - min_score;
+
+    let weight = ranking.rerank_blend_weight.clamp(0.0, 1.0);
+
+    // The server returns scores sorted by relevance with parallel indices.
+    // scores[i] is the score for documents[indices[i]], which maps to
+    // top_candidates[indices[i]].
+    for (idx_in_pool, &doc_idx) in indices.iter().enumerate() {
+        let rerank_raw = scores[idx_in_pool];
+        let rerank_norm = if range > 1e-6 {
+            (rerank_raw - min_score) / range
+        } else {
+            0.5
+        };
+
+        let candidate_idx = top_candidates[doc_idx];
+        let c = &mut candidates[candidate_idx];
+        c.final_score = c.final_score * (1.0 - weight) + rerank_norm * weight;
+    }
+}
+
 fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str, bonus: f32) -> f32 {
     const AUTHORITY: &[(&str, &[&str])] = &[
         ("rust", &["doc.rust-lang.org", "docs.rust-lang.org"]),
@@ -614,14 +761,25 @@ fn domain_authority_bonus(query_tokens: &HashSet<String>, host: &str, bonus: f32
         ("sql", &["www.postgresql.org", "dev.mysql.com"]),
         (
             "postgres",
-            &["www.postgresql.org", "postgresql.org", "wiki.postgresql.org"],
+            &[
+                "www.postgresql.org",
+                "postgresql.org",
+                "wiki.postgresql.org",
+            ],
         ),
         (
             "postgresql",
-            &["www.postgresql.org", "postgresql.org", "wiki.postgresql.org"],
+            &[
+                "www.postgresql.org",
+                "postgresql.org",
+                "wiki.postgresql.org",
+            ],
         ),
         ("sqlite", &["sqlite.org", "www.sqlite.org"]),
-        ("wal", &["www.postgresql.org", "postgresql.org", "sqlite.org"]),
+        (
+            "wal",
+            &["www.postgresql.org", "postgresql.org", "sqlite.org"],
+        ),
         ("mvcc", &["www.postgresql.org", "postgresql.org"]),
         ("xid", &["www.postgresql.org", "postgresql.org"]),
         ("http", &["developer.mozilla.org", "httpwg.org"]),

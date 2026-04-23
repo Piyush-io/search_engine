@@ -92,8 +92,11 @@ lexical_relaxed_min_hits = 4
 lexical_relaxed_extra_k = 200
 
 rerank_enabled = true
-rerank_pool_size = 20
-rerank_blend_weight = 0.20
+rerank_pool_size = 40
+rerank_blend_weight = 0.28
+
+# Identifier queries skip reranker and heading penalties
+# (wired in src/search/query.rs)
 
 [rocksdb]
 block_cache_mb = 256
