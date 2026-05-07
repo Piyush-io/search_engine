@@ -5,7 +5,7 @@ rate_limit_ms = 150
 recrawl_days = 30
 
 [embedding]
-backend = "cuda"
+backend = "coreml"
 model = "bge-base-en-v1.5"
 dim = 768
 batch_size = 32
@@ -13,11 +13,10 @@ max_length = 384
 bulk_workers = 4
 bulk_intra_threads = 2
 # Uncomment to offload embedding inference to a remote GPU embed_server:
-remote_url = "http://192.168.1.15:3001"
+# remote_url = "http://192.168.1.15:3001"
 
 [hnsw]
 backend = "hnsw"
-shards = 1
 m = 16
 ef_construction = 200
 ef_search = 150
@@ -91,7 +90,7 @@ lexical_relaxed_fallback_enabled = true
 lexical_relaxed_min_hits = 4
 lexical_relaxed_extra_k = 200
 
-rerank_enabled = true
+rerank_enabled = false
 rerank_pool_size = 40
 rerank_blend_weight = 0.28
 

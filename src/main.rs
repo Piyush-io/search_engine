@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::get,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -60,6 +59,8 @@ struct ApiError {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = config::load()?;
+    println!("[server] config={}", config::config_path());
+    println!("[server] db_path={}", cfg.paths.db_path);
     println!("[server] {}", client::backend_info()?);
     let stack = bootstrap::load_search_stack()?;
     let ranking = Arc::new(cfg.ranking.clone());

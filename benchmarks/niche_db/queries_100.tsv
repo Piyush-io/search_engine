@@ -1,0 +1,100 @@
+q1	wal_level postgresql configuration parameter
+q2	full_page_writes postgres setting
+q3	synchronous_commit parameter postgresql
+q4	shared_buffers configuration postgres
+q5	work_mem postgres parameter
+q6	maintenance_work_mem setting
+q7	effective_cache_size parameter
+q8	checkpoint_completion_target postgres
+q9	wal_buffers configuration
+q10	max_connections postgresql parameter
+q11	xid postgres transaction id wraparound
+q12	cid postgres command identifier
+q13	txid postgres transaction identifier
+q14	lsn write ahead log location
+q15	ctid postgres tuple identifier
+q16	oid postgres object identifier
+q17	pg_class catalog table
+q18	pg_attribute system catalog
+q19	pg_index catalog table
+q20	pg_statistic system table
+q21	wal vs checkpoint difference
+q22	xid vs cid postgres difference
+q23	btree vs hash index postgres
+q24	gin vs gist index postgresql
+q25	heap vs index scan postgres
+q26	nested loop vs hash join
+q27	merge join vs hash join postgres
+q28	serializable vs repeatable read
+q29	read committed vs read uncommitted
+q30	statement timeout vs lock timeout
+q31	how does postgres handle concurrent writes
+q32	how does vacuum freeze prevent xid wraparound
+q33	how does wal archiving work in postgresql
+q34	why does postgres use mvcc for concurrency
+q35	what prevents dirty reads in postgresql
+q36	how does checkpoint ensure data durability
+q37	why does autovacuum trigger freeze
+q38	how does postgres handle lock contention
+q39	what causes bloat in postgres tables
+q40	how does hot standby work in postgresql
+q41	explain postgres mvcc transaction isolation levels with examples
+q42	postgres wal configuration for replication performance tuning
+q43	understanding postgresql lock types and deadlock detection mechanisms
+q44	postgresql query planning and execution statistics collection methods
+q45	vacuum analyze and statistics maintenance for query optimization
+q46	configuring postgresql for high write throughput and wal optimization
+q47	postgresql logical replication vs physical streaming replication differences
+q48	monitoring postgres replication lag and conflict resolution strategies
+q49	partitioning strategies in postgresql for large table management
+q50	connection pooling and pgbouncer configuration best practices
+q51	sqlite wal mode advantages disadvantages
+q52	sqlite journal_mode delete vs wal vs memory
+q53	sqlite busy_timeout pragma setting
+q54	sqlite cache_size configuration parameter
+q55	sqlite page_size pragma value
+q56	sqlite synchronous pragma normal full off
+q57	sqlite temp_store pragma memory file
+q58	sqlite mmap_size pragma configuration
+q59	sqlite auto_vacuum pragma none full incremental
+q60	sqlite encoding pragma utf8 utf16
+q61	sqlite btree vs ldb storage
+q62	sqlite rowid vs without rowid
+q63	sqlite strict vs flexible typing
+q64	sqlite inner join vs cross join
+q65	sqlite left join vs inner join behavior
+q66	sqlite index scan vs table scan
+q67	sqlite exclusive lock vs shared lock
+q68	sqlite reserved lock vs pending lock
+q69	sqlite wal checkpoint passive vs full vs restart
+q70	sqlite auto_vacuum vs manual vacuum
+q71	how does sqlite implement atomic commits
+q72	how does sqlite concurrency control work with wal
+q73	why does sqlite use btree for storage
+q74	how does sqlite handle database corruption recovery
+q75	what prevents write conflicts in sqlite wal mode
+q76	how does sqlite query planner choose indexes
+q77	why does sqlite have limited alter table support
+q78	how does sqlite fts5 full text search work
+q79	what causes database locked error in sqlite
+q80	how does sqlite foreign key constraint enforcement work
+q81	explain sqlite wal checkpoint truncate and restart operations with examples
+q82	sqlite query optimization analyzing and improving slow query performance
+q83	understanding sqlite page cache and memory management configuration
+q84	sqlite fts5 full text search indexing tokenizers and match expressions
+q85	sqlite json1 extension parsing querying and modifying json data
+q86	sqlite rtree extension spatial indexing for geographic data queries
+q87	sqlite window functions row_number rank dense_rank and partitioning
+q88	sqlite recursive ctes common table expressions for hierarchical data
+q89	sqlite upsert on conflict do update vs do nothing behavior
+q90	sqlite transactions savepoints and rollback journal mechanisms
+q91	postgres deadlock_timeout parameter
+q92	postgres log_min_duration_statement setting
+q93	postgres random_page_cost configuration
+q94	postgres seq_page_cost planner setting
+q95	postgres cpu_tuple_cost parameter
+q96	postgres cpu_index_tuple_cost setting
+q97	postgres effective_io_concurrency configuration
+q98	postgres max_parallel_workers_per_gather
+q99	postgres max_parallel_workers setting
+q100	postgres max_worker_processes parameter

@@ -1,13 +1,46 @@
 use std::path::Path;
 
 use tantivy::{
+    Index, IndexReader, Term,
     collector::TopDocs,
     query::QueryParser,
-    schema::{Field, Schema, Value, STORED, STRING, TEXT},
-    Index, IndexReader, Term,
+    schema::{Field, STORED, STRING, Schema, TEXT, Value},
 };
 
 use crate::{Chunk, ChunkId};
+
+/// Lexical field boost configuration — wired from `config.toml`.
+#[derive(Debug, Clone)]
+pub struct LexicalBoostConfig {
+    pub field_boost_title: f32,
+    pub field_boost_section: f32,
+    pub field_boost_heading: f32,
+    pub field_boost_text: f32,
+    /// Multiplier on field boosts for short-query phrase clauses.
+    /// Default 2.5 preserves legacy hardcoded ^10/^8/^6/^3 pattern.
+    pub short_query_phrase_boost: f32,
+}
+
+impl Default for LexicalBoostConfig {
+    fn default() -> Self {
+        Self {
+            field_boost_title: 4.0,
+            field_boost_section: 3.0,
+            field_boost_heading: 2.5,
+            field_boost_text: 1.0,
+            short_query_phrase_boost: 2.5,
+        }
+    }
+}
+
+fn query_boost(value: f32) -> String {
+    let value = value.max(0.0);
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
 
 #[derive(Clone)]
 pub struct LexicalIndex {
@@ -180,7 +213,7 @@ impl LexicalIndex {
         out
     }
 
-    fn build_query(&self, query_text: &str) -> String {
+    fn build_query(&self, query_text: &str, boosts: &LexicalBoostConfig) -> String {
         let trimmed = query_text.trim();
         if trimmed.is_empty() {
             return trimmed.to_string();
@@ -192,14 +225,23 @@ impl LexicalIndex {
         let word_count = trimmed.split_whitespace().count();
 
         if word_count <= 5 {
+            let phrase_mult = boosts.short_query_phrase_boost.max(0.0);
             if self.title_field.is_some() {
-                clauses.push(format!("title:\"{escaped}\"^10"));
+                let boost = query_boost(boosts.field_boost_title * phrase_mult);
+                clauses.push(format!("title:\"{escaped}\"^{boost}"));
             }
             if self.section_field.is_some() {
-                clauses.push(format!("section:\"{escaped}\"^8"));
+                let boost = query_boost(boosts.field_boost_section * phrase_mult);
+                clauses.push(format!("section:\"{escaped}\"^{boost}"));
             }
-            clauses.push(format!("heading:\"{escaped}\"^6"));
-            clauses.push(format!("text:\"{escaped}\"^3"));
+            {
+                let boost = query_boost(boosts.field_boost_heading * phrase_mult);
+                clauses.push(format!("heading:\"{escaped}\"^{boost}"));
+            }
+            {
+                let boost = query_boost(boosts.field_boost_text * phrase_mult);
+                clauses.push(format!("text:\"{escaped}\"^{boost}"));
+            }
         }
 
         clauses.join(" OR ")
@@ -212,6 +254,7 @@ impl LexicalIndex {
         relaxed_fallback_enabled: bool,
         relaxed_min_hits: usize,
         relaxed_extra_k: usize,
+        boosts: &LexicalBoostConfig,
     ) -> Result<Vec<(ChunkId, f32)>, Box<dyn std::error::Error>> {
         if k == 0 {
             return Ok(Vec::new());
@@ -229,15 +272,15 @@ impl LexicalIndex {
         let mut parser = QueryParser::for_index(&self.index, default_fields.clone());
         parser.set_conjunction_by_default();
         if let Some(title_field) = self.title_field {
-            parser.set_field_boost(title_field, 4.0);
+            parser.set_field_boost(title_field, boosts.field_boost_title);
         }
         if let Some(section_field) = self.section_field {
-            parser.set_field_boost(section_field, 3.0);
+            parser.set_field_boost(section_field, boosts.field_boost_section);
         }
-        parser.set_field_boost(self.heading_field, 2.5);
-        parser.set_field_boost(self.text_field, 1.0);
+        parser.set_field_boost(self.heading_field, boosts.field_boost_heading);
+        parser.set_field_boost(self.text_field, boosts.field_boost_text);
         parser.set_field_boost(self.source_url_field, 0.2);
-        let query = self.build_query(query_text);
+        let query = self.build_query(query_text, boosts);
         let q = parser.parse_query(&query)?;
 
         let top = searcher.search(&q, &TopDocs::with_limit(k))?;
@@ -262,13 +305,13 @@ impl LexicalIndex {
             let relaxed_limit = (k + relaxed_extra_k).max(k);
             let mut parser = QueryParser::for_index(&self.index, default_fields);
             if let Some(title_field) = self.title_field {
-                parser.set_field_boost(title_field, 4.0);
+                parser.set_field_boost(title_field, boosts.field_boost_title);
             }
             if let Some(section_field) = self.section_field {
-                parser.set_field_boost(section_field, 3.0);
+                parser.set_field_boost(section_field, boosts.field_boost_section);
             }
-            parser.set_field_boost(self.heading_field, 2.5);
-            parser.set_field_boost(self.text_field, 1.0);
+            parser.set_field_boost(self.heading_field, boosts.field_boost_heading);
+            parser.set_field_boost(self.text_field, boosts.field_boost_text);
             parser.set_field_boost(self.source_url_field, 0.2);
             let q = parser.parse_query(&query)?;
 

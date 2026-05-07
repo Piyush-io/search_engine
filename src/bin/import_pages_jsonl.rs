@@ -102,7 +102,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if inserted % FLUSH_EVERY == 0 {
             db.write(batch)?;
             batch = WriteBatch::default();
-            println!("[import_pages_jsonl] inserted={} skipped={}", inserted, skipped);
+            println!(
+                "[import_pages_jsonl] inserted={} skipped={}",
+                inserted, skipped
+            );
         }
     }
 

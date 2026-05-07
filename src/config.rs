@@ -35,6 +35,11 @@ pub struct EmbeddingConfig {
     /// Intra-op thread count per bulk session. Default: 4.
     #[serde(default = "default_bulk_intra_threads")]
     pub bulk_intra_threads: usize,
+    /// Optional URL of a remote embed-server (e.g. http://192.168.1.100:3001).
+    /// When set, all embedding inference is forwarded over HTTP instead of
+    /// running a local ONNX session.
+    #[serde(default)]
+    pub remote_url: Option<String>,
 }
 
 fn default_bulk_workers() -> usize {
@@ -54,7 +59,7 @@ fn default_recrawl_days() -> u64 {
     30
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct RankingConfig {
     #[serde(default = "default_short_vec_weight")]
     pub short_vec_weight: f32,
@@ -122,6 +127,61 @@ pub struct RankingConfig {
     pub lexical_relaxed_min_hits: usize,
     #[serde(default = "default_lexical_relaxed_extra_k")]
     pub lexical_relaxed_extra_k: usize,
+
+    // Lexical field boost configuration (for tantivy field weights)
+    #[serde(default = "default_lexical_field_boost_title")]
+    pub lexical_field_boost_title: f32,
+    #[serde(default = "default_lexical_field_boost_section")]
+    pub lexical_field_boost_section: f32,
+    #[serde(default = "default_lexical_field_boost_heading")]
+    pub lexical_field_boost_heading: f32,
+    #[serde(default = "default_lexical_field_boost_text")]
+    pub lexical_field_boost_text: f32,
+
+    // Lexical query boost configuration
+    #[serde(default = "default_lexical_short_query_phrase_boost")]
+    pub lexical_short_query_phrase_boost: f32,
+
+    // HNSW ef_search configuration per query class (adaptive search exploration)
+    #[serde(default = "default_ef_search_short")]
+    pub ef_search_short: usize,
+    #[serde(default = "default_ef_search_long")]
+    pub ef_search_long: usize,
+    #[serde(default = "default_ef_search_identifier")]
+    pub ef_search_identifier: usize,
+
+    // Host policy configuration for niche corpus cleanup
+    /// Multiplier for trusted (canonical) hosts. 1.0 = neutral, >1.0 boosts, <1.0 penalizes.
+    /// Default: 1.0 (backward compatible)
+    #[serde(default = "default_host_allowlist_boost")]
+    pub host_allowlist_boost: f32,
+    /// Score penalty multiplier for noisy/low-quality hosts. 1.0 = neutral, <1.0 reduces score.
+    /// Default: 1.0 (backward compatible)
+    #[serde(default = "default_host_soft_penalty")]
+    pub host_soft_penalty: f32,
+    /// Hard cap on results per host in top-k. None = unlimited (backward compatible).
+    /// Recommended: 3-5 for niche profiles to prevent host dominance.
+    #[serde(default = "default_host_hard_cap")]
+    pub host_hard_cap: Option<usize>,
+    /// List of canonical/trusted hosts to apply allowlist boost to.
+    /// Default: empty (backward compatible, no special handling)
+    #[serde(default = "default_host_allowlist")]
+    pub host_allowlist: Vec<String>,
+    /// List of noisy hosts to apply soft penalty to.
+    /// Default: empty (backward compatible, no special handling)
+    #[serde(default = "default_host_penalty_list")]
+    pub host_penalty_list: Vec<String>,
+
+    // Cross-encoder reranking configuration
+    /// Enable cross-encoder reranking via remote embed_server. Default: false.
+    #[serde(default = "default_rerank_enabled")]
+    pub rerank_enabled: bool,
+    /// Number of top heuristic candidates to send to reranker. Default: 20.
+    #[serde(default = "default_rerank_pool_size")]
+    pub rerank_pool_size: usize,
+    /// Blend weight for reranker score (0.0 = pure heuristic, 1.0 = pure reranker). Default: 0.35.
+    #[serde(default = "default_rerank_blend_weight")]
+    pub rerank_blend_weight: f32,
 }
 
 fn default_short_vec_weight() -> f32 {
@@ -224,10 +284,65 @@ fn default_lexical_relaxed_extra_k() -> usize {
     200
 }
 
+// Lexical field boost defaults
+fn default_lexical_field_boost_title() -> f32 {
+    4.0
+}
+fn default_lexical_field_boost_section() -> f32 {
+    3.0
+}
+fn default_lexical_field_boost_heading() -> f32 {
+    2.5
+}
+fn default_lexical_field_boost_text() -> f32 {
+    1.0
+}
+fn default_lexical_short_query_phrase_boost() -> f32 {
+    2.5
+}
+
+// HNSW ef_search defaults per query class
+fn default_ef_search_short() -> usize {
+    120
+}
+fn default_ef_search_long() -> usize {
+    80
+}
+fn default_ef_search_identifier() -> usize {
+    150
+}
+
+// Host policy defaults (all neutral for backward compatibility)
+fn default_host_allowlist_boost() -> f32 {
+    1.0
+}
+fn default_host_soft_penalty() -> f32 {
+    1.0
+}
+fn default_host_hard_cap() -> Option<usize> {
+    None
+}
+fn default_host_allowlist() -> Vec<String> {
+    Vec::new()
+}
+fn default_host_penalty_list() -> Vec<String> {
+    Vec::new()
+}
+
+// Reranker defaults
+fn default_rerank_enabled() -> bool {
+    false
+}
+fn default_rerank_pool_size() -> usize {
+    20
+}
+fn default_rerank_blend_weight() -> f32 {
+    0.35
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HnswConfig {
     pub backend: String,
-    pub shards: usize,
     pub m: usize,
     pub ef_construction: usize,
     pub ef_search: usize,
@@ -273,9 +388,12 @@ fn default_seeds_path() -> String {
     "./seeds.md".to_string()
 }
 
+pub fn config_path() -> String {
+    std::env::var("SEARCH_ENGINE_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string())
+}
+
 pub fn load() -> Result<Config, Box<dyn std::error::Error>> {
-    let config_path =
-        std::env::var("SEARCH_ENGINE_CONFIG_PATH").unwrap_or_else(|_| "config.toml".to_string());
+    let config_path = config_path();
     let text = std::fs::read_to_string(config_path)?;
     Ok(toml::from_str(&text)?)
 }

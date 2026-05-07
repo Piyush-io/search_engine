@@ -416,6 +416,7 @@ pub fn domain_cap(host: &str) -> usize {
 
 pub fn host_allowed(host: &str) -> bool {
     let allow = [
+        "docs.aws.amazon.com",
         "doc.rust-lang.org",
         "docs.python.org",
         "developer.mozilla.org",

@@ -1,11 +1,14 @@
-use std::{io, str::FromStr, sync::OnceLock};
+use std::{io, sync::OnceLock, time::Duration};
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{InitOptions, TextEmbedding};
 #[cfg(target_os = "macos")]
 use ort::execution_providers::CoreMLExecutionProvider;
 use ort::execution_providers::ExecutionProviderDispatch;
 
-use crate::{EmbeddingVec, config};
+use crate::{EmbeddingVec, config, embeddings};
+
+// Remove local parse_model_name duplicate — use embeddings::parse_model_name.
+use crate::embeddings::remote;
 
 const FASTEMBED_MAX_INNER_BATCH: usize = 32;
 
@@ -16,30 +19,16 @@ struct ModelState {
     backend: String,
 }
 
-static MODEL: OnceLock<Result<ModelState, String>> = OnceLock::new();
-
-fn parse_model_name(raw: &str) -> Result<EmbeddingModel, String> {
-    let lower = raw.trim().to_ascii_lowercase();
-
-    let mapped = match lower.as_str() {
-        "all-minilm-l6-v2" => Some(EmbeddingModel::AllMiniLML6V2),
-        "all-minilm-l6-v2-q" => Some(EmbeddingModel::AllMiniLML6V2Q),
-        "all-minilm-l12-v2" => Some(EmbeddingModel::AllMiniLML12V2),
-        "all-minilm-l12-v2-q" => Some(EmbeddingModel::AllMiniLML12V2Q),
-        "paraphrase-mpnet-base-v2" => Some(EmbeddingModel::ParaphraseMLMpnetBaseV2),
-        "bge-small-en-v1.5" => Some(EmbeddingModel::BGESmallENV15),
-        "bge-small-en-v1.5-q" => Some(EmbeddingModel::BGESmallENV15Q),
-        "bge-base-en-v1.5" => Some(EmbeddingModel::BGEBaseENV15),
-        "bge-base-en-v1.5-q" => Some(EmbeddingModel::BGEBaseENV15Q),
-        _ => None,
-    };
-
-    if let Some(m) = mapped {
-        return Ok(m);
-    }
-
-    EmbeddingModel::from_str(raw)
+enum Backend {
+    Local(ModelState),
+    Remote {
+        url: String,
+        model_name: String,
+        dim: usize,
+    },
 }
+
+static BACKEND: OnceLock<Result<Backend, String>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 fn coreml_providers() -> Vec<ExecutionProviderDispatch> {
@@ -78,9 +67,37 @@ fn which_exists(name: &str) -> bool {
         .is_ok()
 }
 
-fn init_model() -> Result<ModelState, String> {
+fn init_backend() -> Result<Backend, String> {
     let cfg = config::load().map_err(|e| format!("failed loading config.toml: {e}"))?;
 
+    // ── Remote mode ──────────────────────────────────────────────────────
+    if let Some(url) = cfg.embedding.remote_url.as_deref() {
+        let url = url.trim();
+        if !url.is_empty() {
+            // Verify remote is reachable before claiming success.
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .map_err(|e| format!("failed to build health-check client: {e}"))?;
+            let resp = client
+                .get(format!("{url}/health"))
+                .send()
+                .map_err(|e| format!("embed server unreachable at {url}: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!(
+                    "embed server health check returned {} at {url}",
+                    resp.status()
+                ));
+            }
+            return Ok(Backend::Remote {
+                url: url.to_string(),
+                model_name: cfg.embedding.model,
+                dim: cfg.embedding.dim,
+            });
+        }
+    }
+
+    // ── Local mode ───────────────────────────────────────────────────────
     let raw_backend = cfg.embedding.backend.trim().to_ascii_lowercase();
     let backend = if raw_backend == "auto" || raw_backend == "fastembed" {
         detect_backend().to_string()
@@ -88,7 +105,7 @@ fn init_model() -> Result<ModelState, String> {
         raw_backend
     };
 
-    let parsed = parse_model_name(&cfg.embedding.model)?;
+    let parsed = embeddings::parse_model_name(&cfg.embedding.model)?;
 
     let info = TextEmbedding::get_model_info(&parsed).map_err(|e| {
         format!(
@@ -125,16 +142,16 @@ fn init_model() -> Result<ModelState, String> {
         )
     })?;
 
-    Ok(ModelState {
+    Ok(Backend::Local(ModelState {
         model,
         dim: cfg.embedding.dim,
         model_name: cfg.embedding.model,
         backend,
-    })
+    }))
 }
 
-fn state() -> Result<&'static ModelState, Box<dyn std::error::Error>> {
-    let res = MODEL.get_or_init(init_model);
+fn state() -> Result<&'static Backend, Box<dyn std::error::Error>> {
+    let res = BACKEND.get_or_init(init_backend);
     match res {
         Ok(s) => Ok(s),
         Err(msg) => Err(io::Error::other(msg.clone()).into()),
@@ -142,18 +159,30 @@ fn state() -> Result<&'static ModelState, Box<dyn std::error::Error>> {
 }
 
 pub fn configured_dim() -> Result<usize, Box<dyn std::error::Error>> {
-    Ok(state()?.dim)
+    match state()? {
+        Backend::Local(s) => Ok(s.dim),
+        Backend::Remote { dim, .. } => Ok(*dim),
+    }
 }
 
 pub fn backend_info() -> Result<String, Box<dyn std::error::Error>> {
-    let s = state()?;
-    Ok(format!(
-        "backend={} model={} dim={}",
-        s.backend, s.model_name, s.dim
-    ))
+    match state()? {
+        Backend::Local(s) => Ok(format!(
+            "local backend={} model={} dim={}",
+            s.backend, s.model_name, s.dim
+        )),
+        Backend::Remote {
+            url,
+            model_name,
+            dim,
+        } => Ok(format!(
+            "remote url={} model={} dim={}",
+            url, model_name, dim
+        )),
+    }
 }
 
-fn format_query_for_model(model_name: &str, query: &str) -> String {
+pub(crate) fn format_query_for_model(model_name: &str, query: &str) -> String {
     let trimmed = query.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -174,51 +203,93 @@ fn format_query_for_model(model_name: &str, query: &str) -> String {
 
 /// Embed a single text. Fails fast if model is unavailable.
 pub fn embed(text: &str) -> Result<EmbeddingVec, Box<dyn std::error::Error>> {
-    let s = state()?;
-    let out = s
-        .model
-        .embed(vec![text.to_string()], Some(1))
-        .map_err(|e| io::Error::other(format!("model '{}' embed failed: {e}", s.model_name)))?;
-
-    let Some(v) = out.into_iter().next() else {
-        return Err(io::Error::other("embedding model returned empty batch").into());
-    };
-
-    validate_and_normalize(v, s.dim)
+    let mut batch = embed_batch(&[text.to_string()])?;
+    batch.pop().ok_or_else(|| "empty embedding".into())
 }
 
 /// Embed a search query, applying model-specific retrieval formatting when useful.
 pub fn embed_query(query: &str) -> Result<EmbeddingVec, Box<dyn std::error::Error>> {
-    let s = state()?;
-    let formatted = format_query_for_model(&s.model_name, query);
-    if formatted.is_empty() {
-        return Err(io::Error::other("query text is empty").into());
+    match state()? {
+        Backend::Local(s) => {
+            let formatted = format_query_for_model(&s.model_name, query);
+            if formatted.is_empty() {
+                return Err(io::Error::other("query text is empty").into());
+            }
+            embed(&formatted)
+        }
+        Backend::Remote {
+            url,
+            model_name,
+            dim,
+        } => {
+            let mut vecs = remote::request_embed(
+                url,
+                &[query.to_string()],
+                /* is_query */ true,
+                model_name,
+                *dim,
+            )?;
+            vecs.pop().ok_or_else(|| "empty embedding".into())
+        }
     }
-    embed(&formatted)
 }
 
+/// Embed a batch of documents.  For remote backends the entire batch is shipped
+/// to the server in one HTTP request.
 pub fn embed_batch(texts: &[String]) -> Result<Vec<EmbeddingVec>, Box<dyn std::error::Error>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
 
-    let s = state()?;
-    let mut vecs = Vec::with_capacity(texts.len());
+    match state()? {
+        Backend::Local(local) => {
+            let mut vecs = Vec::with_capacity(texts.len());
 
-    for batch in texts.chunks(FASTEMBED_MAX_INNER_BATCH) {
-        let out = s
-            .model
-            .embed(batch.to_vec(), Some(batch.len()))
-            .map_err(|e| {
-                io::Error::other(format!("model '{}' batch embed failed: {e}", s.model_name))
-            })?;
+            for batch in texts.chunks(FASTEMBED_MAX_INNER_BATCH) {
+                let out = local
+                    .model
+                    .embed(batch.to_vec(), Some(batch.len()))
+                    .map_err(|e| {
+                        io::Error::other(format!(
+                            "model '{}' batch embed failed: {e}",
+                            local.model_name
+                        ))
+                    })?;
 
-        for v in out {
-            vecs.push(validate_and_normalize(v, s.dim)?);
+                for v in out {
+                    vecs.push(validate_and_normalize(v, local.dim)?);
+                }
+            }
+
+            Ok(vecs)
         }
+        Backend::Remote {
+            url,
+            model_name,
+            dim,
+        } => remote::request_embed(url, texts, /* is_query */ false, model_name, *dim),
+    }
+}
+
+/// Rerank a list of documents against a query using a cross-encoder.
+/// Returns (scores, indices) where indices are sorted by descending score.
+/// Only supported for remote backends (GPU embed_server).
+pub fn rerank(
+    query: &str,
+    documents: &[String],
+    top_k: usize,
+) -> Result<(Vec<f32>, Vec<usize>), Box<dyn std::error::Error>> {
+    if documents.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
     }
 
-    Ok(vecs)
+    match state()? {
+        Backend::Local(_) => Err(io::Error::other(
+            "local reranking not implemented — set embedding.remote_url to use GPU embed_server",
+        )
+        .into()),
+        Backend::Remote { url, .. } => remote::request_rerank(url, query, documents, top_k),
+    }
 }
 
 pub fn cosine_similarity(a: &EmbeddingVec, b: &EmbeddingVec) -> f32 {

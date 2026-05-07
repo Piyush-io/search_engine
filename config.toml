@@ -15,7 +15,6 @@ bulk_intra_threads = 2      # lighter CPU parallelism during local bulk embeddin
 
 [hnsw]
 backend = "hnsw"
-shards = 1
 m = 8
 ef_construction = 80        # lowered for local full-build RAM safety
 ef_search = 120

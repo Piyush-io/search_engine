@@ -124,11 +124,7 @@ fn collapse_slashes(path: &str) -> String {
             last_was_slash = false;
         }
     }
-    if out.is_empty() {
-        "/".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "/".to_string() } else { out }
 }
 
 #[cfg(test)]
@@ -165,8 +161,10 @@ mod tests {
 
     #[test]
     fn normalizes_rust_doc_channel_paths() {
-        let a = canonical_doc_key("https://doc.rust-lang.org/stable/reference/lifetime-elision.html");
-        let b = canonical_doc_key("https://docs.rust-lang.org/nightly/reference/lifetime-elision.html");
+        let a =
+            canonical_doc_key("https://doc.rust-lang.org/stable/reference/lifetime-elision.html");
+        let b =
+            canonical_doc_key("https://docs.rust-lang.org/nightly/reference/lifetime-elision.html");
         assert_eq!(a, b);
     }
 }

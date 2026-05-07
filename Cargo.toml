@@ -11,7 +11,7 @@ bincode = "1"
 futures = "0.3.31"
 kuchiki = "0.8.1"
 publicsuffix = "2"
-reqwest = { version = "0.13.1", features = ["json"] }
+reqwest = { version = "0.13.1", features = ["json", "blocking"] }
 rocksdb = "0.24.0"
 scraper = "0.25.0"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -30,6 +30,7 @@ aes-gcm = "0.10"
 rand = "0.8"
 dashmap = "6"
 hnsw_rs = "0.3.3"
+clap = { version = "4", features = ["derive"] }
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -38,6 +39,9 @@ rlimit = "0.11.0"
 ureq = "3.2.0"
 regex = "1"
 urlencoding = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 # macOS: CoreML (Apple Neural Engine / GPU)
 [target.'cfg(target_os = "macos")'.dependencies]

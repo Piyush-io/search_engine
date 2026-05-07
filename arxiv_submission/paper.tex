@@ -19,7 +19,7 @@
 
 \newcommand{\system}{Retrieval X-Ray\xspace}
 
-\title{Retrieval X-Ray: A Hybrid Neural Retrieval System with Incremental Maintenance and Integrated Debugging}
+\title{Retrieval X-Ray: Hybrid Retrieval and Interactive Debugging for Technical Documentation}
 
 \author{
 \IEEEauthorblockN{Piyush Mittal}
@@ -31,7 +31,6 @@ Rohini, New Delhi, India
 \and
 \IEEEauthorblockN{Dr. Ankita Gupta}
 \IEEEauthorblockA{
-\textit{Project Mentor and Assistant Professor} \\
 \textit{Department of Computer Science and Engineering} \\
 \textit{Maharaja Agrasen Institute of Technology (MAIT)} \\
 Rohini, New Delhi, India
@@ -43,11 +42,11 @@ Rohini, New Delhi, India
 \maketitle
 
 \begin{abstract}
-This paper presents \system, a Rust-based hybrid retrieval system for computer science content that combines web crawling, content normalization, sentence-aware chunking, dense embedding, lexical indexing, and server-side result delivery within a single end-to-end architecture. The system is designed not only to retrieve relevant passages, but also to make retrieval behavior inspectable through score decomposition and dedicated debugging interfaces. To support a mutable corpus under constrained hardware, the architecture uses RocksDB-backed persistent state, page-state manifests, content-hash chunk identifiers, queue-driven downstream maintenance, vector tombstones, and a composite vector backend consisting of a compacted Hierarchical Navigable Small World (HNSW) base index with a mutable brute-force delta overlay. Across the project, two findings were especially important: first, corpus engineering and representation design affected retrieval quality as strongly as model or ranker changes; second, local memory ceilings materially shaped the final architecture, motivating incremental maintenance and remote rebuild workflows. The paper details the system design, implementation decisions, and observed engineering trade-offs, and argues that debuggability should be treated as a first-class property of modern retrieval systems.
+This paper presents \system, a Rust-based hybrid retrieval system for technical documentation that combines web crawling, content normalization, sentence-aware chunking, dense embedding, lexical indexing, and server-side result delivery within a single end-to-end architecture. The system is designed not only to retrieve relevant passages, but also to make retrieval behavior inspectable through score decomposition and dedicated debugging interfaces. To support a mutable corpus under constrained hardware, the architecture uses RocksDB-backed persistent state, page-state manifests, content-hash chunk identifiers, queue-driven downstream maintenance, vector tombstones, and a composite vector backend consisting of a compacted Hierarchical Navigable Small World (HNSW) base index with a mutable brute-force delta overlay. A judged 100-query benchmark is used to establish a practical retrieval baseline, but the primary contribution is an alternative retrieval-and-debugging workflow rather than a claim of leaderboard-optimized ranking quality. Across the project, two findings were especially important: first, corpus engineering and representation design affected retrieval quality as strongly as model or ranker changes; second, local memory ceilings materially shaped the final architecture, motivating incremental maintenance and remote rebuild workflows. The paper details the system design, implementation decisions, and observed engineering trade-offs, and argues that debuggability should be treated as a first-class property of modern retrieval systems.
 \end{abstract}
 
 \begin{IEEEkeywords}
-information retrieval, neural retrieval, hybrid retrieval, HNSW, incremental indexing, RocksDB, retrieval debugging
+information retrieval, dense retrieval, hybrid retrieval, retrieval evaluation, HNSW, incremental indexing, RocksDB
 \end{IEEEkeywords}
 
 \section{Introduction}
@@ -61,7 +60,14 @@ A second motivation comes from the needs of modern RAG systems. In many applicat
 
 The system design in this work was also shaped by practical constraints. University-scale and individual projects rarely have access to industrial search infrastructure. As a result, the architecture must favor durability, resumability, bounded memory use, and targeted offloading of heavyweight rebuild tasks. In \system, those constraints are not treated as incidental deployment details; they are treated as part of the retrieval problem itself.
 
-This paper makes four contributions. First, it presents an end-to-end Rust retrieval system for computer science content with crawling, normalization, chunking, embedding, hybrid search, and serving. Second, it describes an incremental maintenance architecture based on page-state manifests, content-hash chunk identifiers, queue-driven index updates, and a base-plus-delta vector design. Third, it reports engineering findings about the strong effect of corpus curation and representation design on retrieval quality. Fourth, it demonstrates a retrieval debugging approach centered on score decomposition and an interactive terminal interface, supporting the broader claim that retrieval systems should be designed to be inspectable as well as accurate.
+This paper makes four contributions. First, it presents an end-to-end Rust retrieval system for technical content with crawling, normalization, chunking, embedding, hybrid search, and serving. Second, it describes an incremental maintenance architecture based on page-state manifests, content-hash chunk identifiers, queue-driven index updates, and a base-plus-delta vector design. Third, it reports engineering findings about the strong effect of corpus curation and representation design on retrieval quality under limited hardware budgets. Fourth, it demonstrates a retrieval debugging workflow centered on score decomposition and an interactive terminal interface, supporting the broader claim that retrieval systems should be designed to be inspectable as well as accurate.
+
+\section{Related Work}
+Classical lexical retrieval remains a strong baseline for technical search because exact terminology, identifiers, and short noun phrases often carry high relevance. BM25 and related probabilistic retrieval formulations remain widely used because they are efficient, interpretable, and effective for exact-term matching \cite{robertson2009bm25}.
+
+Dense retrieval complements lexical ranking by improving semantic recall when the query and relevant passage differ lexically. Dual-encoder approaches such as Dense Passage Retrieval showed that learned dense representations can outperform strong sparse baselines on open-domain retrieval tasks \cite{karpukhin2020dpr}. In practice, however, dense retrieval alone can drift toward topically related but operationally weak results, especially in technical corpora where exact terms and section structure matter.
+
+Hybrid retrieval combines these signals rather than choosing one in isolation. Rank-fusion methods such as RRF are attractive because they avoid brittle score calibration while still exploiting complementary strengths across retrievers \cite{cormack2009rrf}. This matters even more in retrieval-augmented generation settings, where retrieval quality directly affects factuality and answer grounding \cite{lewis2020rag}. The present work follows that hybrid tradition, but emphasizes an underexplored systems concern: an inspectable alternative IR stack in which incremental maintainability and interactive debugging are treated as first-class design goals.
 
 \section{System Design}
 \subsection{Overview}
@@ -110,12 +116,12 @@ This design reflects a practical compromise. HNSW offers scalable approximate ne
 \subsection{Lexical Retrieval and Hybrid Fusion}
 Lexical retrieval is implemented with Tantivy and follows BM25-style ranking principles \cite{robertson2009bm25}. The lexical index stores fields including chunk identifier, title, section, body text, heading, and source URL. Titles and headings are boosted more strongly than body text, especially for short technical queries, and phrase-oriented clauses are supported for compact terminology-heavy searches.
 
-Hybrid retrieval proceeds in two stages. First, vector and lexical search produce candidate sets independently. Second, the candidates are combined using reciprocal rank fusion and reranked with lightweight features.
+Hybrid retrieval proceeds in two stages. First, vector and lexical search produce candidate sets independently. Second, the candidates are combined using reciprocal rank fusion (RRF) and reranked with lightweight features \cite{cormack2009rrf}.
 
 The reranker incorporates normalized vector score, normalized lexical score, token overlap with title, heading, and body fields, exact phrase matches, and a domain-authority bonus for official sources. The query pipeline also includes hand-authored synonym expansion for common technical abbreviations and paired terms such as \texttt{js/javascript}, \texttt{ts/typescript}, \texttt{auth/authentication}, and \texttt{gpu/cuda}.
 
 \subsection{Serving and Debugging}
-The serving layer uses Axum to provide server-side rendered search results and click tracking backed by RocksDB. In parallel, the system provides a retrieval debugging interface implemented as a terminal user interface (TUI) using \texttt{ratatui} and \texttt{crossterm}. The TUI exposes query input, ranked results, detailed score inspection, strategy comparison, and failure-analysis views. Each result carries decomposed ranking features, making it possible to inspect not only the final rank but also the signals that produced it.
+The serving layer uses Axum to provide server-side rendered search results and click tracking backed by RocksDB. In parallel, the system provides a retrieval debugging interface implemented as a terminal user interface (TUI) under the repository's \texttt{tui/} directory using \texttt{@opentui/core}. The TUI consumes the Rust server's \texttt{/debug/api/search} and \texttt{/debug/api/eval} endpoints, and exposes query input, ranked results, detailed score inspection, strategy comparison, and failure-analysis views. Each result carries decomposed ranking features, making it possible to inspect not only the final rank but also the signals that produced it.
 
 This debugging layer is central to the system's design philosophy. \system is intended not only to retrieve passages, but also to support direct analysis of why those passages were returned.
 
@@ -145,10 +151,10 @@ At runtime, the search stack consists of a RocksDB database, a vector index comp
 \subsection{Evaluation Utilities}
 The repository includes evaluation utilities for qrels-based measurement, with support for Mean Reciprocal Rank, NDCG@k, and Recall@k. It also includes benchmark binaries for query latency, approximate nearest-neighbor benchmarking, and embedding throughput.
 
-These utilities are functionally useful, but the broader evaluation suite remains incomplete. Accordingly, they should be understood as supporting infrastructure rather than as a finalized experimental framework.
+These utilities were used to run a judged 100-query offline benchmark over the domain-focused corpus. The current evaluation is therefore substantial enough to support comparative analysis inside the project, although broader cross-domain testing and larger external benchmarks remain future work.
 
 \subsection{Retrieval Debugging TUI}
-The TUI is implemented in \texttt{src/tui/} with separate application state, input handlers, and rendering logic, and is exposed through \texttt{debug\_tui} and \texttt{debug\_tui\_integrated} binaries. The interface supports multiple inspection views and displays per-result features such as final score, vector score, lexical score, title overlap, heading overlap, body overlap, and authority bonus.
+The TUI is implemented in \texttt{tui/src/index.ts} with separate state, input handlers, and rendering logic around the live debug APIs. The interface supports multiple inspection views and displays per-result features such as final score, vector score, lexical score, title overlap, heading overlap, body overlap, and authority bonus.
 
 This design makes debugging part of the retrieval stack itself rather than an afterthought delegated to logs or offline scripts.
 
@@ -159,8 +165,28 @@ A major redesign occurred when corpus growth made naive rebuild assumptions incr
 
 The project also showed that retrieval quality gains came from representation and corpus choices at least as much as from model selection. Repeatedly useful changes included richer \texttt{embed\_text} construction, sliding-window chunking, synonym expansion for technical abbreviations, title and heading overlap features, phrase signals, and authority-sensitive bonuses for official domains. The broader lesson was that technical retrieval quality depends strongly on representing structure explicitly.
 
-\section{Results and Observations}
-This section reports grounded observations from the implemented system and available project measurements. It does not claim a fully completed final benchmark suite.
+\section{Evaluation and System Findings}
+This section reports grounded results from the implemented system, combining a hardware-constrained offline benchmark with operational measurements collected during development.
+
+\subsection{Offline Benchmark Setup}
+Offline evaluation used a judged benchmark of 100 technical queries with qrels-based relevance labels. The query set spans exact identifiers, acronym disambiguation, conceptual paraphrases, and long-form mixed queries, enabling analysis beyond a single average score. Metrics were computed as MRR, NDCG@k, Recall@k, and zero-result rate. In this paper, the benchmark is used as a sanity-check baseline and as support for failure analysis, not as the sole basis for judging the system's value.
+
+The best archived configuration achieved MRR 0.485, NDCG@10 0.488, Recall@10 0.645, and a zero-result rate of 0\% on this benchmark.
+
+\begin{table}[t]
+\caption{Offline baseline metrics on the 100-query benchmark.}
+\label{tab:offline-metrics}
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{cccc}
+\toprule
+\textbf{MRR} & \textbf{NDCG@10} & \textbf{Recall@10} & \textbf{Zero-result} \\
+\midrule
+0.485 & 0.488 & 0.645 & 0.0\% \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Corpus Scale}
 Across different stages, the system operated at multi-million-chunk scale. Table~\ref{tab:corpora} summarizes major corpus snapshots.
@@ -214,11 +240,14 @@ One of the clearest systems findings was the repeated failure of full local HNSW
 In other words, the final architecture was shaped by observed memory ceilings rather than by abstract design preference.
 
 \subsection{Retrieval Quality Observations}
-The available evidence on retrieval quality is more qualitative than quantitative, but several conclusions are well supported by implementation history and repeated testing.
+The offline benchmark makes two patterns clear. First, performance varies significantly by query class. In the best archived run, conceptual paraphrase queries reached MRR 0.599, long-form mixed queries reached MRR 0.496, acronym disambiguation reached MRR 0.526, while exact identifier queries lagged at MRR 0.362. Second, the zero-result rate remained at 0\%, showing that the system consistently returns candidates even when ranking quality is imperfect.
 
 First, richer embedding text improved retrieval. Including page-title and heading context made many technical passages more retrievable semantically. Second, chunking strategy mattered substantially: sentence-only chunking, paragraph-style grouping, and sliding windows behaved differently, especially for explanations distributed across adjacent sentences. Third, hybrid reranking improved short technical queries, with phrase matches, field overlap, and official-domain bonuses proving especially useful. Fourth, corpus quality often dominated ranker tweaks; removing noisy hosts and isolating a higher-quality profile had outsized effect.
 
 Earlier pilot-style evaluation on a limited internal setup also suggested that chunking choice strongly affects effectiveness. In that setting, sentence chunking reached approximately MRR 0.71 and Recall@3 0.62, paragraph chunking reached approximately MRR 0.83 and Recall@3 0.78, and a fixed-512 baseline reached approximately MRR 0.64 and Recall@3 0.54. These figures should be interpreted as preliminary internal evidence rather than as final benchmark claims, but they are directionally informative and support the need for dedicated comparison and debugging tools.
+
+\subsection{Failure Analysis}
+Per-query diagnosis also exposed recurring error patterns. The weakest queries were disproportionately natural-language comparison and explanation queries such as \emph{what causes bloat in postgres tables} and \emph{how does postgres handle concurrent writes}. In these cases, lexical retrieval often returned zero candidates, leaving dense retrieval to surface off-topic or non-canonical results. Exact-identifier queries showed a different failure mode: lexical evidence existed, but large vector candidate pools increased latency and allowed semantically related but less authoritative chunks to compete with the canonical source. These findings align with the bucket-level results, where exact identifier performance is the clearest remaining weakness.
 
 \subsection{Debuggability as an Outcome}
 A distinctive outcome of the project is that retrieval inspection became part of the system's identity rather than a secondary utility. The TUI exposes per-hit score decomposition instead of only final rankings. This supports workflows such as identifying cases where lexical evidence is strong but semantic evidence is weak, diagnosing heading mismatch or context fragmentation, comparing ranking strategies, and verifying whether authority or phrase signals helped or hurt.
@@ -228,15 +257,17 @@ Even without a fully developed browser-based analysis dashboard, the system demo
 \section{Limitations}
 \system remains a substantial prototype rather than a finalized production search platform, and several limitations should be stated explicitly.
 
-First, the evaluation story is incomplete. The repository includes metric computation and benchmark utilities, but larger recall studies, broader query-set evaluation, and report-grade benchmark tables remain unfinished. The available quantitative evidence is therefore partial.
+First, the evaluation remains narrow in scope. The project now includes a meaningful judged 100-query benchmark and reportable offline metrics, but it still lacks larger public benchmarks, cross-domain evaluation, and stronger baseline comparisons against alternative retrievers.
 
-Second, the latest verified debugging interface is a TUI rather than a full browser-based analysis environment. The TUI is useful and meaningful, but some richer debugging workflows remain future work.
+Second, the reported benchmark should be read as a constrained baseline rather than a ceiling. The available hardware budget limited embedding-model choice, corpus breadth, and the frequency of full HNSW rebuilds. Better hardware would most likely improve retrieval quality indirectly by enabling larger models, broader corpora, and more frequent rebuild-and-refresh cycles, although hardware alone does not constitute the paper's main contribution.
 
-Third, full vector maintenance still depends on occasional expensive rebuilds. The base-plus-delta design reduces that pressure, but does not eliminate it. Large-scale HNSW compaction remains costly enough to require remote infrastructure on the available local hardware.
+Third, the latest verified debugging interface is a TUI rather than a full browser-based analysis environment. The TUI is useful and meaningful, but some richer debugging workflows remain future work.
 
-Fourth, parts of the ranking logic are heuristic and domain-specific. Synonym expansion, authority bonuses, and short-query weighting improve practical relevance, but they are hand-authored rather than learned and may not generalize across domains.
+Fourth, full vector maintenance still depends on occasional expensive rebuilds. The base-plus-delta design reduces that pressure, but does not eliminate it. Large-scale HNSW compaction remains costly enough to require remote infrastructure on the available local hardware.
 
-Fifth, the corpus remains web-derived and therefore noisy by nature. Strong improvements were achieved through host pruning and profile isolation, but corpus quality remains an ongoing systems challenge rather than a solved preprocessing step.
+Fifth, parts of the ranking logic are heuristic and domain-specific. Synonym expansion, authority bonuses, and short-query weighting improve practical relevance, but they are hand-authored rather than learned and may not generalize across domains.
+
+Sixth, the corpus remains web-derived and therefore noisy by nature. Strong improvements were achieved through host pruning and profile isolation, but corpus quality remains an ongoing systems challenge rather than a solved preprocessing step.
 
 Finally, earlier experimental artifacts around learning-based statement chaining were not fully integrated into the production retrieval path. Runtime chaining behavior is therefore still heuristic.
 
@@ -254,11 +285,11 @@ On the indexing side, further work could explore automated thresholds for delta 
 Because the system already records retrieval decomposition, a natural extension is to connect retrieval inspection to downstream generation quality. This would support analysis of how retrieval failures propagate into RAG outputs, enabling end-to-end grounded-answer debugging rather than passage-ranking inspection alone.
 
 \section{Conclusion}
-\system demonstrates that building a neural retrieval system is as much a systems engineering problem as a ranking problem. The project produced a working Rust-based hybrid retrieval engine for computer science content, with persistent RocksDB storage, chunking and embedding pipelines, HNSW-based dense retrieval, Tantivy-based lexical retrieval, hybrid reranking, and result serving. More importantly, it evolved toward an architecture that treats mutation, rebuild cost, and debuggability as core design concerns.
+\system demonstrates that building a neural retrieval system is as much a systems engineering problem as a ranking problem. The project produced a working Rust-based hybrid retrieval engine for technical documentation, with persistent RocksDB storage, chunking and embedding pipelines, HNSW-based dense retrieval, Tantivy-based lexical retrieval, hybrid reranking, and result serving. More importantly, it evolved toward an architecture that treats mutation, rebuild cost, and debuggability as core design concerns.
 
 Three conclusions stand out. First, dense retrieval quality depended strongly on representation choices such as heading context, page-title context, and chunk boundaries. Second, corpus engineering through host pruning, domain caps, and isolated higher-quality profiles was one of the strongest determinants of retrieval quality. Third, resource constraints were not peripheral: the observed failure of full local HNSW rebuilds at around 9.7~GB RSS directly motivated the system's incremental design and remote rebuild workflow.
 
-The final framing around \system is therefore appropriate. The system is not only a hybrid search engine, but also an attempt to make retrieval behavior visible. The implemented TUI, partial evaluation utilities, and score-decomposed ranking pipeline point toward a broader research direction: retrieval systems should be designed not only to rank documents well, but also to explain themselves well enough to be improved systematically.
+The final framing around \system is therefore appropriate. The system is not only a hybrid search engine, but also an alternative retrieval-and-debugging workbench. The implemented TUI, baseline evaluation utilities, and score-decomposed ranking pipeline point toward a broader research direction: retrieval systems should be designed not only to rank documents reasonably well, but also to explain themselves well enough to be improved systematically.
 
 \begin{thebibliography}{10}
 
@@ -279,6 +310,16 @@ S.~E. Robertson and H.~Zaragoza,
 \emph{Foundations and Trends in Information Retrieval},
 vol.~3, no.~4, pp.~333--389, 2009.
 
+\bibitem{karpukhin2020dpr}
+V.~Karpukhin, B.~Oguz, S.~Min, P.~Lewis, L.~Wu, S.~Edunov, D.~Chen, and W.-t. Yih,
+``Dense Passage Retrieval for Open-Domain Question Answering,''
+in \emph{Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing}, 2020, pp.~6769--6781.
+
+\bibitem{cormack2009rrf}
+G.~V. Cormack, C.~L. Clarke, and S.~Buettcher,
+``Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods,''
+in \emph{Proceedings of the 32nd International ACM SIGIR Conference on Research and Development in Information Retrieval}, 2009, pp.~758--759.
+
 \bibitem{cao2020rocksdb}
 Z.~Cao, S.~Dong, S.~Vemuri, and D.~H.~C. Du,
 ``Characterizing, Modeling, and Benchmarking RocksDB Key-Value Workloads at Facebook,''
@@ -293,11 +334,6 @@ BAAI,
 N.~Muennighoff, N.~Tazi, L.~Magne, and N.~Reimers,
 ``MTEB: Massive Text Embedding Benchmark,''
 \emph{arXiv preprint arXiv:2210.07316}, 2022.
-
-\bibitem{lin2025search}
-W.~Lin,
-``Building a Web Search Engine from Scratch in Two Months with 3 Billion Neural Embeddings,''
-Aug.~10, 2025. [Online]. Available: \url{https://blog.wilsonl.in/search-engine/}. [Accessed: Aug.~10, 2025].
 
 \end{thebibliography}
 

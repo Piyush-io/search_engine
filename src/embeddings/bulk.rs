@@ -9,8 +9,9 @@
 //! paths.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use fastembed::{EmbeddingModel, TextEmbedding, TokenizerFiles, read_file_to_bytes};
+use fastembed::{TextEmbedding, TokenizerFiles, read_file_to_bytes};
 use ndarray::{Array2, s};
 use ort::{
     session::{Session, builder::GraphOptimizationLevel},
@@ -19,6 +20,81 @@ use ort::{
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 use crate::EmbeddingVec;
+
+// ── timing/observability types ───────────────────────────────────────────────
+
+/// Shared timing statistics for bulk embedding operations.
+pub struct TimingStats {
+    pub items_processed: AtomicU64,
+    pub items_failed: AtomicU64,
+    pub batches_processed: AtomicU64,
+    pub total_embed_duration_ms: AtomicU64,
+}
+
+impl TimingStats {
+    pub fn new() -> Self {
+        Self {
+            items_processed: AtomicU64::new(0),
+            items_failed: AtomicU64::new(0),
+            batches_processed: AtomicU64::new(0),
+            total_embed_duration_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_success(&self, count: usize, duration_ms: u64) {
+        self.items_processed
+            .fetch_add(count as u64, Ordering::Relaxed);
+        self.batches_processed.fetch_add(1, Ordering::Relaxed);
+        self.total_embed_duration_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+    }
+
+    pub fn record_failure(&self, count: usize) {
+        self.items_failed.fetch_add(count as u64, Ordering::Relaxed);
+        self.batches_processed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get_stats(&self) -> TimingSnapshot {
+        TimingSnapshot {
+            items_processed: self.items_processed.load(Ordering::Relaxed),
+            items_failed: self.items_failed.load(Ordering::Relaxed),
+            batches_processed: self.batches_processed.load(Ordering::Relaxed),
+            total_embed_duration_ms: self.total_embed_duration_ms.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Default for TimingStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TimingSnapshot {
+    pub items_processed: u64,
+    pub items_failed: u64,
+    pub batches_processed: u64,
+    pub total_embed_duration_ms: u64,
+}
+
+impl TimingSnapshot {
+    pub fn throughput(&self, elapsed_secs: f64) -> f64 {
+        if elapsed_secs > 0.0 {
+            self.items_processed as f64 / elapsed_secs
+        } else {
+            0.0
+        }
+    }
+
+    pub fn avg_batch_duration_ms(&self) -> f64 {
+        if self.batches_processed > 0 {
+            self.total_embed_duration_ms as f64 / self.batches_processed as f64
+        } else {
+            0.0
+        }
+    }
+}
 
 // ── public types ─────────────────────────────────────────────────────────────
 
@@ -110,7 +186,7 @@ pub fn create_workers(
     count: usize,
     intra_threads: usize,
 ) -> Result<Vec<BulkWorker>, Box<dyn std::error::Error>> {
-    let parsed = parse_model_name(model_name)?;
+    let parsed = crate::embeddings::parse_model_name(model_name)?;
 
     let model_info =
         TextEmbedding::get_model_info(&parsed).map_err(|e| format!("model info: {e}"))?;
@@ -150,27 +226,6 @@ pub fn create_workers(
 
 // ── internals ────────────────────────────────────────────────────────────────
 
-fn parse_model_name(raw: &str) -> Result<EmbeddingModel, Box<dyn std::error::Error>> {
-    use std::str::FromStr;
-    let lower = raw.trim().to_ascii_lowercase();
-    let mapped = match lower.as_str() {
-        "all-minilm-l6-v2" => Some(EmbeddingModel::AllMiniLML6V2),
-        "all-minilm-l6-v2-q" => Some(EmbeddingModel::AllMiniLML6V2Q),
-        "all-minilm-l12-v2" => Some(EmbeddingModel::AllMiniLML12V2),
-        "all-minilm-l12-v2-q" => Some(EmbeddingModel::AllMiniLML12V2Q),
-        "paraphrase-mpnet-base-v2" => Some(EmbeddingModel::ParaphraseMLMpnetBaseV2),
-        "bge-small-en-v1.5" => Some(EmbeddingModel::BGESmallENV15),
-        "bge-small-en-v1.5-q" => Some(EmbeddingModel::BGESmallENV15Q),
-        "bge-base-en-v1.5" => Some(EmbeddingModel::BGEBaseENV15),
-        "bge-base-en-v1.5-q" => Some(EmbeddingModel::BGEBaseENV15Q),
-        _ => None,
-    };
-    if let Some(m) = mapped {
-        return Ok(m);
-    }
-    EmbeddingModel::from_str(raw).map_err(|_| format!("unknown model: {raw}").into())
-}
-
 fn find_snapshot_dir(model_code: &str, model_file: &str) -> Option<PathBuf> {
     let cache_root = fastembed::get_cache_dir();
     let repo_folder = format!("models--{}", model_code.replace('/', "--"));
@@ -201,8 +256,9 @@ fn read_file_bytes(dir: &Path, name: &str) -> Result<Vec<u8>, Box<dyn std::error
 fn build_session(
     model_path: &Path,
     intra_threads: usize,
-    backend: &str,
+    _backend: &str,
 ) -> Result<Session, Box<dyn std::error::Error>> {
+    #[allow(unused_mut)]
     let mut builder = Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(intra_threads)?
@@ -210,7 +266,7 @@ fn build_session(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let use_cuda = backend == "cuda" || backend == "auto";
+        let use_cuda = _backend == "cuda" || _backend == "auto";
         if use_cuda {
             use ort::execution_providers::CUDAExecutionProvider;
             builder =

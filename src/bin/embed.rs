@@ -3,16 +3,50 @@ use std::{sync::mpsc, time::Instant};
 use bytemuck::cast_slice;
 use rocksdb::{DBRawIteratorWithThreadMode, IteratorMode, ReadOptions, WriteBatch, WriteOptions};
 use search_engine::{
-    config,
+    Chunk, config,
     embeddings::{bulk, client},
     pipeline::IndexOperation,
-    storage, Chunk,
+    storage,
 };
 use tracing::{debug, info};
 
 const FLUSH_EVERY: usize = 20_000;
 const STREAM_READAHEAD_BYTES: usize = 8 * 1024 * 1024;
 const CHANNEL_DEPTH: usize = 8;
+const TIMING_REPORT_EVERY: usize = 5_000;
+
+/// Timing summary for machine-readable output.
+#[derive(Debug, serde::Serialize)]
+struct TimingReport {
+    profile: String,
+    model: String,
+    backend: String,
+    dim: usize,
+    max_length: usize,
+    batch_size: usize,
+    total_items: usize,
+    wall_time_secs: f64,
+    embed_time_secs: f64,
+    write_time_secs: f64,
+    throughput_items_per_sec: f64,
+    avg_batch_time_ms: f64,
+    skipped_existing: usize,
+    skipped_non_leaf: usize,
+    skipped_malformed: usize,
+}
+
+impl TimingReport {
+    fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(
+            std::path::Path::new(path)
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        )?;
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+}
 
 fn has_flag(flag: &str) -> bool {
     std::env::args().any(|arg| arg == flag)
@@ -65,6 +99,7 @@ struct DoneItem {
     ids: Vec<Vec<u8>>,
     vectors: Vec<Vec<f32>>,
     embed_dur: std::time::Duration,
+    batch_size: usize,
 }
 
 fn run_embed_queue(
@@ -185,10 +220,14 @@ fn run_embed_queue(
 fn run_full_scan(
     cfg: &config::Config,
     db: std::sync::Arc<rocksdb::DB>,
+    timing_output: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let embeddings_cf = storage::cf(&db, storage::CF_EMBEDDINGS)?;
 
-    let embed_mode = {
+    let embed_mode = if has_flag("--fresh") {
+        info!("fresh mode: embedding everything unconditionally (skipping Bloom filter)");
+        EmbedMode::Fresh
+    } else {
         let empty = is_cf_empty(&db, embeddings_cf)?;
         if empty {
             info!("fast mode: no existing embeddings — will embed everything");
@@ -204,16 +243,31 @@ fn run_full_scan(
     let _ = search_engine::embeddings::client::configured_dim()?;
     info!(ms = t_warm.elapsed().as_millis() as u64, "cache warm");
 
+    // ── Remote backend path (uses embed_server over HTTP) ──────────────────
+    let is_remote = cfg.embedding.remote_url.is_some();
+
     let max_length = cfg.embedding.max_length.unwrap_or(256);
-    let workers = bulk::create_workers(
-        &cfg.embedding.model,
-        &cfg.embedding.backend,
-        max_length,
-        cfg.embedding.dim,
-        cfg.embedding.bulk_workers,
-        cfg.embedding.bulk_intra_threads,
-    )?;
-    info!(workers = workers.len(), "workers created");
+    let workers = if is_remote {
+        Vec::new() // remote path doesn't use bulk workers
+    } else {
+        bulk::create_workers(
+            &cfg.embedding.model,
+            &cfg.embedding.backend,
+            max_length,
+            cfg.embedding.dim,
+            cfg.embedding.bulk_workers,
+            cfg.embedding.bulk_intra_threads,
+        )?
+    };
+    info!(
+        workers = workers.len(),
+        remote = is_remote,
+        "workers created"
+    );
+
+    // Track timing for periodic progress reports
+    let progress_start = Instant::now();
+    let last_report = std::sync::atomic::AtomicUsize::new(0);
 
     let (work_tx, work_rx) = mpsc::sync_channel::<WorkItem>(CHANNEL_DEPTH);
     let (done_tx, done_rx) = mpsc::sync_channel::<DoneItem>(CHANNEL_DEPTH);
@@ -222,34 +276,81 @@ fn run_full_scan(
     let shared_rx = Arc::new(Mutex::new(work_rx));
 
     let mut handles = Vec::new();
-    for worker in workers {
+
+    let remote_workers = if is_remote {
+        cfg.embedding.bulk_workers.max(1)
+    } else {
+        0
+    };
+
+    for _ in 0..remote_workers {
         let rx = Arc::clone(&shared_rx);
         let tx = done_tx.clone();
-        let handle = std::thread::spawn(move || loop {
-            let item = {
-                let guard = rx.lock().expect("work queue mutex poisoned");
-                guard.recv()
-            };
-            match item {
-                Err(_) => break,
-                Ok(WorkItem { ids, texts }) => {
-                    let t_embed = Instant::now();
-                    match worker.embed_batch(&texts) {
-                        Err(err) => {
-                            tracing::error!(error = %err, batch = texts.len(), "embed_batch failed");
-                        }
-                        Ok(vectors) => {
-                            let _ = tx.send(DoneItem {
-                                ids,
-                                vectors,
-                                embed_dur: t_embed.elapsed(),
-                            });
+        let handle = std::thread::spawn(move || {
+            loop {
+                let item = {
+                    let guard = rx.lock().expect("work queue mutex poisoned");
+                    guard.recv()
+                };
+                match item {
+                    Err(_) => break,
+                    Ok(WorkItem { ids, texts }) => {
+                        let batch_size = texts.len();
+                        let t_embed = Instant::now();
+                        match client::embed_batch(&texts) {
+                            Err(err) => {
+                                tracing::error!(error = %err, batch = batch_size, "remote embed_batch failed");
+                            }
+                            Ok(vectors) => {
+                                let _ = tx.send(DoneItem {
+                                    ids,
+                                    vectors,
+                                    embed_dur: t_embed.elapsed(),
+                                    batch_size,
+                                });
+                            }
                         }
                     }
                 }
             }
         });
         handles.push(handle);
+    }
+
+    if !is_remote {
+        for worker in workers {
+            let rx = Arc::clone(&shared_rx);
+            let tx = done_tx.clone();
+            let handle = std::thread::spawn(move || {
+                loop {
+                    let item = {
+                        let guard = rx.lock().expect("work queue mutex poisoned");
+                        guard.recv()
+                    };
+                    match item {
+                        Err(_) => break,
+                        Ok(WorkItem { ids, texts }) => {
+                            let batch_size = texts.len();
+                            let t_embed = Instant::now();
+                            match worker.embed_batch(&texts) {
+                                Err(err) => {
+                                    tracing::error!(error = %err, batch = batch_size, "embed_batch failed");
+                                }
+                                Ok(vectors) => {
+                                    let _ = tx.send(DoneItem {
+                                        ids,
+                                        vectors,
+                                        embed_dur: t_embed.elapsed(),
+                                        batch_size,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            handles.push(handle);
+        }
     }
     drop(done_tx);
 
@@ -342,14 +443,19 @@ fn run_full_scan(
     let mut total_embed_dur = std::time::Duration::ZERO;
     let mut total_write_dur = std::time::Duration::ZERO;
     let started = Instant::now();
+    let mut total_batches = 0usize;
+    let mut _total_batch_items = 0usize;
 
     while let Ok(DoneItem {
         ids,
         vectors,
         embed_dur,
+        batch_size,
     }) = done_rx.recv()
     {
         total_embed_dur += embed_dur;
+        total_batches += 1;
+        let _ = batch_size; // Used for tracking
 
         let t_write = Instant::now();
         let mut wb = WriteBatch::default();
@@ -362,20 +468,32 @@ fn run_full_scan(
 
         debug!(batch_size = ids.len(), "full-scan embed batch complete");
 
-        if embedded - last_flush_at >= FLUSH_EVERY {
-            let _ = db.flush_cf(embeddings_cf);
-            last_flush_at = embedded;
-            let elapsed = started.elapsed().as_secs_f64();
+        // Periodic progress report
+        let prev_report = last_report.load(std::sync::atomic::Ordering::Relaxed);
+        if embedded - prev_report >= TIMING_REPORT_EVERY {
+            last_report.store(embedded, std::sync::atomic::Ordering::Relaxed);
+            let elapsed = progress_start.elapsed().as_secs_f64();
             let rate = if elapsed > 0.0 {
                 embedded as f64 / elapsed
             } else {
                 0.0
             };
+            let avg_batch_ms = if total_batches > 0 {
+                total_embed_dur.as_millis() as f64 / total_batches as f64
+            } else {
+                0.0
+            };
             info!(
                 embedded,
-                rate_per_sec = format_args!("{rate:.0}"),
+                rate_per_sec = format_args!("{rate:.1}"),
+                avg_batch_ms = format_args!("{avg_batch_ms:.1}"),
                 "progress"
             );
+        }
+
+        if embedded - last_flush_at >= FLUSH_EVERY {
+            let _ = db.flush_cf(embeddings_cf);
+            last_flush_at = embedded;
         }
     }
 
@@ -391,17 +509,62 @@ fn run_full_scan(
         .map_err(|_| "reader thread panicked")??;
 
     let loop_dur = started.elapsed();
+    let loop_secs = loop_dur.as_secs_f64();
+    let embed_secs = total_embed_dur.as_secs_f64();
+    let write_secs = total_write_dur.as_secs_f64();
+    let throughput = if loop_secs > 0.0 {
+        embedded as f64 / loop_secs
+    } else {
+        0.0
+    };
+    let avg_batch_ms = if total_batches > 0 {
+        total_embed_dur.as_millis() as f64 / total_batches as f64
+    } else {
+        0.0
+    };
+
     info!("─── full-scan embedding complete ───");
     info!(
         scanned = seen,
         embedded, skipped_existing, skipped_non_leaf, skipped_malformed
     );
     info!(
-        embed_secs = format_args!("{:.1}", total_embed_dur.as_secs_f64()),
-        write_secs = format_args!("{:.1}", total_write_dur.as_secs_f64()),
-        wall_secs = format_args!("{:.1}", loop_dur.as_secs_f64()),
+        embed_secs = format_args!("{:.1}", embed_secs),
+        write_secs = format_args!("{:.1}", write_secs),
+        wall_secs = format_args!("{:.1}", loop_secs),
+        throughput = format_args!("{:.1}", throughput),
+        avg_batch_ms = format_args!("{:.1}", avg_batch_ms),
         "time breakdown"
     );
+
+    // Save timing report if requested
+    if let Some(report_path) = timing_output {
+        let profile = std::path::Path::new(report_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        let report = TimingReport {
+            profile: profile.to_string(),
+            model: cfg.embedding.model.clone(),
+            backend: cfg.embedding.backend.clone(),
+            dim: cfg.embedding.dim,
+            max_length: cfg.embedding.max_length.unwrap_or(256),
+            batch_size: cfg.embedding.batch_size,
+            total_items: embedded,
+            wall_time_secs: loop_secs,
+            embed_time_secs: embed_secs,
+            write_time_secs: write_secs,
+            throughput_items_per_sec: throughput,
+            avg_batch_time_ms: avg_batch_ms,
+            skipped_existing,
+            skipped_non_leaf,
+            skipped_malformed,
+        };
+        match report.save(report_path) {
+            Ok(_) => info!(path = report_path, "timing report saved"),
+            Err(e) => tracing::warn!(error = %e, "failed to save timing report"),
+        }
+    }
 
     let embed_queue_cf = storage::cf(&db, storage::CF_EMBED_QUEUE)?;
     let vector_queue_cf = storage::cf(&db, storage::CF_VECTOR_QUEUE)?;
@@ -462,20 +625,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = config::load()?;
+    let config_path = config::config_path();
+
+    // Parse command line args for --timing flag
+    let args: Vec<String> = std::env::args().collect();
+    let timing_output = args
+        .iter()
+        .position(|arg| arg == "--timing")
+        .and_then(|i| args.get(i + 1).map(|s| s.as_str()));
+
     info!(
+        config_path = %config_path,
+        db_path = %cfg.paths.db_path,
         backend = %cfg.embedding.backend,
+        remote_url = ?cfg.embedding.remote_url,
         model = %cfg.embedding.model,
         dim = cfg.embedding.dim,
         batch_size = cfg.embedding.batch_size,
         max_length = cfg.embedding.max_length.unwrap_or(256),
         bulk_workers = cfg.embedding.bulk_workers,
         bulk_intra_threads = cfg.embedding.bulk_intra_threads,
+        timing_output = ?timing_output,
         "embedding config"
     );
+    info!(backend = %client::backend_info()?, "embedding backend resolved");
 
     if has_flag("--full-scan") {
         let db = std::sync::Arc::new(storage::open_db_for_bulk_write(&cfg.paths.db_path)?);
-        return run_full_scan(&cfg, db);
+        return run_full_scan(&cfg, db, timing_output);
     }
 
     let db = storage::open_db_for_bulk_write(&cfg.paths.db_path)?;

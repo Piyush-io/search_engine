@@ -17,7 +17,10 @@ pub struct SearchStack {
 
 pub fn load_search_stack() -> Result<SearchStack, Box<dyn std::error::Error>> {
     let cfg = config::load()?;
-    let db = Arc::new(storage::open_db(&cfg.paths.db_path)?);
+    let db = Arc::new(storage::open_db_with_cache(
+        &cfg.paths.db_path,
+        cfg.rocksdb.block_cache_mb,
+    )?);
 
     let index_backend = cfg.hnsw.backend.to_ascii_lowercase();
     println!(

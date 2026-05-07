@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnswio::*;
@@ -30,7 +31,7 @@ pub struct HnswIndex {
     dim: usize,
     m: usize,
     ef_construction: usize,
-    ef_search: usize,
+    ef_search: AtomicUsize,
     max_elements: usize,
     hnsw: Hnsw<'static, f32, DistCosine>,
     entries: Vec<Entry>,
@@ -54,7 +55,7 @@ impl HnswIndex {
             dim,
             m,
             ef_construction,
-            ef_search,
+            ef_search: AtomicUsize::new(ef_search.max(1)),
             max_elements,
             hnsw,
             entries: Vec::new(),
@@ -66,8 +67,8 @@ impl HnswIndex {
         self.entries.len()
     }
 
-    pub fn set_ef_search(&mut self, ef_search: usize) {
-        self.ef_search = ef_search.max(1);
+    pub fn get_ef_search(&self) -> usize {
+        self.ef_search.load(Ordering::Relaxed)
     }
 
     pub fn insert(&mut self, chunk_id: ChunkId, vector: EmbeddingVec) {
@@ -99,11 +100,20 @@ impl HnswIndex {
     }
 
     pub fn search(&self, query: &EmbeddingVec, k: usize) -> Vec<(ChunkId, f32)> {
+        self.search_with_ef(query, k, self.get_ef_search())
+    }
+
+    pub fn search_with_ef(
+        &self,
+        query: &EmbeddingVec,
+        k: usize,
+        ef_search: usize,
+    ) -> Vec<(ChunkId, f32)> {
         if k == 0 || self.entries.is_empty() || query.len() != self.dim {
             return Vec::new();
         }
 
-        let ef = self.ef_search.max(k);
+        let ef = ef_search.max(k);
         let neighbours = self.hnsw.search(query.as_slice(), k, ef);
 
         let mut out = Vec::with_capacity(neighbours.len());
@@ -130,7 +140,7 @@ impl HnswIndex {
             dim: self.dim,
             m: self.m,
             ef_construction: self.ef_construction,
-            ef_search: self.ef_search,
+            ef_search: self.get_ef_search(),
             max_elements: self.max_elements,
             entries_len: self.entries.len(),
         };

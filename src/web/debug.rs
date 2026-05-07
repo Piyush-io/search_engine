@@ -208,10 +208,26 @@ pub fn build_debug_search_response(
         short_query,
         score_gap_top1_top2: score_gap_top1_top2(hits),
         host_diversity: hosts.len(),
-        avg_vector_score: average(results.iter().map(|result| result.score_breakdown.vector_score)),
-        avg_lexical_score: average(results.iter().map(|result| result.score_breakdown.lexical_score)),
-        avg_heading_overlap: average(results.iter().map(|result| result.score_breakdown.heading_overlap)),
-        avg_body_overlap: average(results.iter().map(|result| result.score_breakdown.body_overlap)),
+        avg_vector_score: average(
+            results
+                .iter()
+                .map(|result| result.score_breakdown.vector_score),
+        ),
+        avg_lexical_score: average(
+            results
+                .iter()
+                .map(|result| result.score_breakdown.lexical_score),
+        ),
+        avg_heading_overlap: average(
+            results
+                .iter()
+                .map(|result| result.score_breakdown.heading_overlap),
+        ),
+        avg_body_overlap: average(
+            results
+                .iter()
+                .map(|result| result.score_breakdown.body_overlap),
+        ),
         dense_dominant_hits,
         lexical_dominant_hits,
         authority_boosted_hits,
@@ -328,7 +344,12 @@ fn build_debug_hit(
         .filter(|term| !combined_terms.contains(*term))
         .cloned()
         .collect();
-    let diagnostics = diagnose_hit(hit, word_count(&hit.text), matched_terms.len(), missing_terms.len());
+    let diagnostics = diagnose_hit(
+        hit,
+        word_count(&hit.text),
+        matched_terms.len(),
+        missing_terms.len(),
+    );
     let host = url_host(&hit.source_url).unwrap_or_default();
     let score_breakdown = build_score_breakdown(hit, ranking, short_query);
 
@@ -393,13 +414,14 @@ fn build_score_breakdown(
         0.0
     };
 
-    let penalty_multiplier = if short_query && hit.title_overlap == 0.0 && hit.heading_overlap == 0.0 {
-        ranking.no_heading_penalty
-    } else if short_query && hit.title_overlap == 0.0 && hit.heading_overlap < 0.34 {
-        ranking.weak_heading_penalty
-    } else {
-        1.0
-    };
+    let penalty_multiplier =
+        if short_query && hit.title_overlap == 0.0 && hit.heading_overlap == 0.0 {
+            ranking.no_heading_penalty
+        } else if short_query && hit.title_overlap == 0.0 && hit.heading_overlap < 0.34 {
+            ranking.weak_heading_penalty
+        } else {
+            1.0
+        };
 
     let pre_authority_score = (base_total + phrase_bonus) * penalty_multiplier;
     let reconstructed_final = pre_authority_score + hit.authority_bonus;
@@ -446,7 +468,8 @@ fn diagnose_hit(
         diagnostics.push(DebugDiagnostic {
             code: "semantic_confusion".to_string(),
             label: "Semantic drift risk".to_string(),
-            reason: "Strong dense similarity is not backed by lexical overlap or heading evidence.".to_string(),
+            reason: "Strong dense similarity is not backed by lexical overlap or heading evidence."
+                .to_string(),
         });
     }
 
@@ -504,7 +527,9 @@ fn diagnose_hit(
         diagnostics.push(DebugDiagnostic {
             code: "partial_coverage".to_string(),
             label: "Partial coverage".to_string(),
-            reason: "Only part of the query is covered, which can leave the answer context incomplete.".to_string(),
+            reason:
+                "Only part of the query is covered, which can leave the answer context incomplete."
+                    .to_string(),
         });
     }
 
@@ -529,20 +554,25 @@ fn first_relevant_rank(ranked: &[String], rel_map: &HashMap<&str, u32>) -> Optio
 }
 
 fn ndcg_at_k(ranked: &[String], rel_map: &HashMap<&str, u32>, k: usize) -> f64 {
-    let dcg = ranked.iter().enumerate().take(k).fold(0.0, |sum, (index, doc_id)| {
-        let relevance = *rel_map.get(doc_id.as_str()).unwrap_or(&0) as f64;
-        sum + ((2.0_f64).powf(relevance) - 1.0) / (index as f64 + 2.0).log2()
-    });
+    let dcg = ranked
+        .iter()
+        .enumerate()
+        .take(k)
+        .fold(0.0, |sum, (index, doc_id)| {
+            let relevance = *rel_map.get(doc_id.as_str()).unwrap_or(&0) as f64;
+            sum + ((2.0_f64).powf(relevance) - 1.0) / (index as f64 + 2.0).log2()
+        });
 
     let mut ideal_relevances: Vec<u32> = rel_map.values().copied().collect();
     ideal_relevances.sort_by(|a, b| b.cmp(a));
-    let ideal = ideal_relevances
-        .into_iter()
-        .enumerate()
-        .take(k)
-        .fold(0.0, |sum, (index, relevance)| {
-            sum + ((2.0_f64).powf(relevance as f64) - 1.0) / (index as f64 + 2.0).log2()
-        });
+    let ideal =
+        ideal_relevances
+            .into_iter()
+            .enumerate()
+            .take(k)
+            .fold(0.0, |sum, (index, relevance)| {
+                sum + ((2.0_f64).powf(relevance as f64) - 1.0) / (index as f64 + 2.0).log2()
+            });
 
     if ideal == 0.0 { 0.0 } else { dcg / ideal }
 }
@@ -573,7 +603,11 @@ fn returned_relevant(ranked: &[String], rel_map: &HashMap<&str, u32>, k: usize) 
 }
 
 fn missed_relevant(ranked: &[String], rel_map: &HashMap<&str, u32>, k: usize) -> Vec<String> {
-    let seen: HashSet<&str> = ranked.iter().take(k).map(|doc_id| doc_id.as_str()).collect();
+    let seen: HashSet<&str> = ranked
+        .iter()
+        .take(k)
+        .map(|doc_id| doc_id.as_str())
+        .collect();
 
     rel_map
         .iter()
@@ -623,11 +657,7 @@ fn average(values: impl Iterator<Item = f32>) -> f32 {
         count += 1;
     }
 
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f32
-    }
+    if count == 0 { 0.0 } else { sum / count as f32 }
 }
 
 fn score_gap_top1_top2(hits: &[ScoredHit]) -> f32 {
@@ -895,7 +925,11 @@ pub fn render_debug_page(query: &str, hits: &[ScoredHit], elapsed_ms: u128) -> S
             let breadcrumbs = if hit.heading_chain.is_empty() {
                 String::new()
             } else {
-                let chain: Vec<_> = hit.heading_chain.iter().map(|heading| escape_html(heading)).collect();
+                let chain: Vec<_> = hit
+                    .heading_chain
+                    .iter()
+                    .map(|heading| escape_html(heading))
+                    .collect();
                 format!(
                     r#"<div class="breadcrumbs">{}</div>"#,
                     chain.join(r#"<span class="sep">›</span>"#)

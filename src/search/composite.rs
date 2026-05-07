@@ -26,6 +26,31 @@ impl CompositeVectorIndex {
 
 impl VectorIndex for CompositeVectorIndex {
     fn search(&self, query: &EmbeddingVec, k: usize) -> Vec<(ChunkId, f32)> {
+        self.search_inner(query, k, None)
+    }
+
+    fn search_with_ef(
+        &self,
+        query: &EmbeddingVec,
+        k: usize,
+        ef_search: usize,
+    ) -> Vec<(ChunkId, f32)> {
+        self.search_inner(query, k, Some(ef_search))
+    }
+
+    fn len(&self) -> usize {
+        let delta_len = self.delta.as_ref().map(|idx| idx.len()).unwrap_or(0);
+        self.base.len() + delta_len
+    }
+}
+
+impl CompositeVectorIndex {
+    fn search_inner(
+        &self,
+        query: &EmbeddingVec,
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> Vec<(ChunkId, f32)> {
         if k == 0 {
             return Vec::new();
         }
@@ -35,7 +60,13 @@ impl VectorIndex for CompositeVectorIndex {
             .max(k + self.tombstones.len().min(k * 8));
         let mut merged = HashMap::<ChunkId, f32>::new();
 
-        for (id, score) in self.base.search(query, oversample) {
+        let base_hits = if let Some(ef_search) = ef_search {
+            self.base.search_with_ef(query, oversample, ef_search)
+        } else {
+            self.base.search(query, oversample)
+        };
+
+        for (id, score) in base_hits {
             if self.tombstones.contains(&id) {
                 continue;
             }
@@ -61,10 +92,5 @@ impl VectorIndex for CompositeVectorIndex {
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         ranked.truncate(k);
         ranked
-    }
-
-    fn len(&self) -> usize {
-        let delta_len = self.delta.as_ref().map(|idx| idx.len()).unwrap_or(0);
-        self.base.len() + delta_len
     }
 }

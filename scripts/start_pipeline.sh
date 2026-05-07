@@ -2,7 +2,16 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_PATH="${1:-${SEARCH_ENGINE_CONFIG_PATH:-$REPO_ROOT/config.toml}}"
+
+export SEARCH_ENGINE_CONFIG_PATH="$CONFIG_PATH"
+
 cd "$REPO_ROOT"
+
+if [ ! -f "$SEARCH_ENGINE_CONFIG_PATH" ]; then
+    echo "Error: config file not found: $SEARCH_ENGINE_CONFIG_PATH"
+    exit 1
+fi
 
 # A script to run the search engine processing pipeline.
 # TRULY SEQUENTIAL to avoid RocksDB Lock errors.
@@ -10,8 +19,14 @@ cd "$REPO_ROOT"
 echo "=========================================================="
 echo " Starting Search Engine Processing Pipeline (Sequential)"
 echo "=========================================================="
+echo "Config: $SEARCH_ENGINE_CONFIG_PATH"
 
-DB_PATH="./crawl_data"
+DB_PATH=$(awk -F= '/^[[:space:]]*db_path[[:space:]]*=/{gsub(/[ "]/,"",$2); print $2; exit}' "$SEARCH_ENGINE_CONFIG_PATH")
+
+if [ -z "$DB_PATH" ]; then
+    echo "Error: could not read paths.db_path from $SEARCH_ENGINE_CONFIG_PATH"
+    exit 1
+fi
 
 # Validate RocksDB path before doing any work.
 if [ -e "$DB_PATH" ] && [ ! -d "$DB_PATH" ]; then
@@ -65,5 +80,5 @@ fi
 
 echo "=========================================================="
 echo " Pipeline Complete! Run the web server:"
-echo " cargo run --release --bin search_engine"
+echo " SEARCH_ENGINE_CONFIG_PATH=$SEARCH_ENGINE_CONFIG_PATH cargo run --release --bin search_engine"
 echo "=========================================================="

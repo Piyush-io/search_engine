@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 
 use super::url_match::canonical_doc_key;
 
+#[derive(Debug, Clone)]
 pub struct Qrel {
     pub query_id: String,
     pub doc_id: String,

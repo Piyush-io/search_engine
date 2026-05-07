@@ -1,12 +1,151 @@
 use std::collections::HashMap;
 
 use super::qrels::Qrel;
+use super::queries::QueryBucket;
+
+/// Metrics for a specific query bucket
+#[derive(Debug, Clone)]
+pub struct BucketMetrics {
+    pub bucket: QueryBucket,
+    pub num_queries: usize,
+    pub mrr: f64,
+    pub ndcg_at: Vec<(usize, f64)>,
+    pub recall_at: Vec<(usize, f64)>,
+}
+
+/// Simple bucket metrics for string-based bucket names
+#[derive(Debug, Clone)]
+pub struct SimpleBucketMetrics {
+    pub bucket_name: String,
+    pub num_queries: usize,
+    pub mrr: f64,
+    pub avg_ndcg: f64,
+}
 
 pub struct EvalResult {
     pub mrr: f64,
     pub ndcg_at: Vec<(usize, f64)>,
     pub recall_at: Vec<(usize, f64)>,
     pub num_queries: usize,
+    pub zero_result_count: usize,
+    pub bucket_metrics: Vec<BucketMetrics>,
+}
+
+/// Compute metrics with per-bucket breakdown
+pub fn compute_metrics_with_buckets(
+    ranked_lists: &HashMap<String, Vec<String>>,
+    qrels: &HashMap<String, Vec<Qrel>>,
+    query_buckets: &HashMap<String, QueryBucket>,
+    k_values: &[usize],
+) -> EvalResult {
+    // First compute overall metrics
+    let overall = compute_metrics(ranked_lists, qrels, k_values);
+
+    // Compute per-bucket metrics
+    let mut bucket_results: Vec<BucketMetrics> = Vec::new();
+
+    // Group queries by bucket
+    let mut bucket_queries: HashMap<QueryBucket, Vec<String>> = HashMap::new();
+    for (query_id, bucket) in query_buckets {
+        bucket_queries
+            .entry(*bucket)
+            .or_default()
+            .push(query_id.clone());
+    }
+
+    // Compute metrics for each bucket
+    for (bucket, query_ids) in bucket_queries {
+        let bucket_ranked: HashMap<String, Vec<String>> = ranked_lists
+            .iter()
+            .filter(|(k, _)| query_ids.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let bucket_qrels: HashMap<String, Vec<Qrel>> = qrels
+            .iter()
+            .filter(|(k, _)| query_ids.contains(*k))
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect();
+
+        if !bucket_ranked.is_empty() {
+            let metrics = compute_metrics(&bucket_ranked, &bucket_qrels, k_values);
+            bucket_results.push(BucketMetrics {
+                bucket,
+                num_queries: metrics.num_queries,
+                mrr: metrics.mrr,
+                ndcg_at: metrics.ndcg_at,
+                recall_at: metrics.recall_at,
+            });
+        }
+    }
+
+    EvalResult {
+        mrr: overall.mrr,
+        ndcg_at: overall.ndcg_at,
+        recall_at: overall.recall_at,
+        num_queries: overall.num_queries,
+        zero_result_count: overall.zero_result_count,
+        bucket_metrics: bucket_results,
+    }
+}
+
+/// Compute metrics grouped by query buckets (simple string-based buckets)
+pub fn compute_bucket_metrics(
+    ranked_lists: &HashMap<String, Vec<String>>,
+    qrels: &HashMap<String, Vec<Qrel>>,
+    query_buckets: &HashMap<String, String>, // query_id -> bucket_name
+    k_values: &[usize],
+) -> Vec<SimpleBucketMetrics> {
+    use std::collections::HashSet;
+
+    // Group queries by bucket
+    let mut bucket_queries: HashMap<String, HashSet<String>> = HashMap::new();
+    for (query_id, bucket) in query_buckets {
+        bucket_queries
+            .entry(bucket.clone())
+            .or_default()
+            .insert(query_id.clone());
+    }
+
+    let mut results = Vec::new();
+
+    for (bucket_name, query_ids) in bucket_queries {
+        // Filter ranked_lists and qrels to only include this bucket's queries
+        let bucket_ranked: HashMap<String, Vec<String>> = ranked_lists
+            .iter()
+            .filter(|(k, _)| query_ids.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        let bucket_qrels: HashMap<String, Vec<Qrel>> = qrels
+            .iter()
+            .filter(|(k, _)| query_ids.contains(*k))
+            .map(|(k, v): (&String, &Vec<Qrel>)| {
+                (k.clone(), v.iter().cloned().collect::<Vec<Qrel>>())
+            })
+            .collect();
+
+        if bucket_ranked.is_empty() {
+            continue;
+        }
+
+        let metrics = compute_metrics(&bucket_ranked, &bucket_qrels, k_values);
+
+        let avg_ndcg = if !metrics.ndcg_at.is_empty() {
+            metrics.ndcg_at.iter().map(|(_, v)| v).sum::<f64>() / metrics.ndcg_at.len() as f64
+        } else {
+            0.0
+        };
+
+        results.push(SimpleBucketMetrics {
+            bucket_name,
+            num_queries: metrics.num_queries,
+            mrr: metrics.mrr,
+            avg_ndcg,
+        });
+    }
+
+    results
 }
 
 pub fn compute_metrics(
@@ -18,6 +157,7 @@ pub fn compute_metrics(
     let mut ndcg_sums: Vec<f64> = vec![0.0; k_values.len()];
     let mut recall_sums: Vec<f64> = vec![0.0; k_values.len()];
     let mut num_queries = 0;
+    let mut zero_result_count = 0;
 
     for query_id in ranked_lists.keys() {
         let ranked = &ranked_lists[query_id];
@@ -25,6 +165,11 @@ pub fn compute_metrics(
             Some(v) => v,
             None => continue,
         };
+
+        // Count zero-result queries
+        if ranked.is_empty() {
+            zero_result_count += 1;
+        }
 
         let rel_map: HashMap<&str, u32> = judged
             .iter()
@@ -108,6 +253,8 @@ pub fn compute_metrics(
         ndcg_at,
         recall_at,
         num_queries,
+        zero_result_count,
+        bucket_metrics: Vec::new(),
     }
 }
 

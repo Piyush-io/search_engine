@@ -123,8 +123,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rows = Vec::new();
     for ef in [10usize, 50, 100, 200] {
-        hnsw.set_ef_search(ef);
-
         let mut brute_lat = Vec::new();
         let mut ann_lat = Vec::new();
         let mut recalls = Vec::new();
@@ -137,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             brute_lat.push(t0.elapsed().as_millis());
 
             let t1 = Instant::now();
-            let ann = hnsw.search(&qv, 10);
+            let ann = hnsw.search_with_ef(&qv, 10, ef);
             ann_lat.push(t1.elapsed().as_millis());
 
             recalls.push(recall_at_k(&gt, &ann, 10));

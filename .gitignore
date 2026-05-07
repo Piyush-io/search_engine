@@ -12,6 +12,10 @@ wiki_hnsw.bin
 *.hnsw.data
 *.hnsw.graph
 
+# niche corpus artifacts (large)
+*.niche/
+*.niche.bin
+
 # local backups / restores / runtime debris
 *.local_backup/
 migration_backup_*/
@@ -31,6 +35,15 @@ tui/node_modules/
 # local notes
 agents.md
 
+# large binaries / reports (not source)
+*.pdf
+*.docx
+*.tar.gz
+*.bak
+final_report.md
+generate_report.py
+research.pdf
+
 # runtime database files
 CURRENT
 IDENTITY
@@ -43,4 +56,9 @@ OPTIONS-*
 # high quality runtime data (large)
 hnsw_index.high_quality.bin
 lexical_index.high_quality/
+
+# embedding server runtime artifacts
+*.bin
+!Cargo.lock
+!tui/bun.lock
 

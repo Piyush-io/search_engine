@@ -1,739 +1,1375 @@
-process.env.OPENTUI_FORCE_EXPLICIT_WIDTH ??= "false"
+// Retrieval X-Ray TUI
+// ---------------------------------------------------------------------------
+// Designed for monospace fonts with strong differentiation between similar
+// glyphs (0 vs O, 1 vs l, etc.) and clean Unicode coverage. Recommended:
+//   • 0xProto       https://github.com/0xType/0xProto  (preferred)
+//   • JetBrains Mono, Berkeley Mono, Iosevka, IBM Plex Mono
+// All alignment in this file assumes a 1-cell monospace grid.
+// ---------------------------------------------------------------------------
+
+process.env.OPENTUI_FORCE_EXPLICIT_WIDTH ??= "false";
 
 import {
   BoxRenderable,
+  FrameBufferRenderable,
   InputRenderable,
   InputRenderableEvents,
+  RGBA,
   ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
+  TextAttributes,
   TextRenderable,
   createCliRenderer,
   type KeyEvent,
   type SelectOption,
-} from "@opentui/core"
+} from "@opentui/core";
+
+const BOLD = TextAttributes.BOLD;
+import { spawn } from "node:child_process";
 
 type DebugSearchResponse = {
-  query: string
-  elapsed_ms: number
-  result_count: number
-  summary: DebugSummary
-  results: DebugHit[]
-}
+  query: string;
+  elapsed_ms: number;
+  result_count: number;
+  summary: DebugSummary;
+  results: DebugHit[];
+};
 
 type DebugSummary = {
-  query_terms: string[]
-  short_query: boolean
-  score_gap_top1_top2: number
-  host_diversity: number
-  avg_vector_score: number
-  avg_lexical_score: number
-  avg_heading_overlap: number
-  avg_body_overlap: number
-  dense_dominant_hits: number
-  lexical_dominant_hits: number
-  authority_boosted_hits: number
-  exact_phrase_hits: number
-  risk_counts: DebugRiskCount[]
-}
+  query_terms: string[];
+  short_query: boolean;
+  score_gap_top1_top2: number;
+  host_diversity: number;
+  avg_vector_score: number;
+  avg_lexical_score: number;
+  avg_heading_overlap: number;
+  avg_body_overlap: number;
+  dense_dominant_hits: number;
+  lexical_dominant_hits: number;
+  authority_boosted_hits: number;
+  exact_phrase_hits: number;
+  risk_counts: DebugRiskCount[];
+};
 
 type DebugRiskCount = {
-  code: string
-  label: string
-  count: number
-}
+  code: string;
+  label: string;
+  count: number;
+};
 
 type DebugHit = {
-  rank: number
-  chunk_id: string
-  source_url: string
-  display_url: string
-  host: string
-  heading_chain: string[]
-  text: string
-  preview: string
-  matched_terms: string[]
-  missing_terms: string[]
-  diagnostics: DebugDiagnostic[]
-  score_breakdown: DebugScoreBreakdown
-}
+  rank: number;
+  chunk_id: string;
+  source_url: string;
+  display_url: string;
+  host: string;
+  heading_chain: string[];
+  text: string;
+  preview: string;
+  matched_terms: string[];
+  missing_terms: string[];
+  diagnostics: DebugDiagnostic[];
+  score_breakdown: DebugScoreBreakdown;
+};
 
 type DebugDiagnostic = {
-  code: string
-  label: string
-  reason: string
-}
+  code: string;
+  label: string;
+  reason: string;
+};
 
 type DebugScoreBreakdown = {
-  query_mode: string
-  vector_score: number
-  lexical_score: number
-  title_overlap: number
-  heading_overlap: number
-  body_overlap: number
-  vector_contribution: number
-  lexical_contribution: number
-  title_contribution: number
-  heading_contribution: number
-  body_contribution: number
-  base_total: number
-  phrase_bonus: number
-  penalty_multiplier: number
-  pre_authority_score: number
-  authority_bonus: number
-  final_score: number
-  dense_minus_lexical: number
-  exact_heading_phrase: boolean
-  exact_body_phrase: boolean
-  reconstruction_gap: number
-}
+  query_mode: string;
+  vector_score: number;
+  lexical_score: number;
+  title_overlap: number;
+  heading_overlap: number;
+  body_overlap: number;
+  vector_contribution: number;
+  lexical_contribution: number;
+  title_contribution: number;
+  heading_contribution: number;
+  body_contribution: number;
+  base_total: number;
+  phrase_bonus: number;
+  penalty_multiplier: number;
+  pre_authority_score: number;
+  authority_bonus: number;
+  final_score: number;
+  dense_minus_lexical: number;
+  exact_heading_phrase: boolean;
+  exact_body_phrase: boolean;
+  reconstruction_gap: number;
+};
 
 type DebugEvalResponse = {
-  elapsed_ms: number
-  qrels_path: string
-  queries_path: string
-  top_k: number
-  num_queries: number
-  mrr: number
-  ndcg_at: MetricPoint[]
-  recall_at: MetricPoint[]
-  worst_queries: DebugQueryEvalRow[]
-}
+  elapsed_ms: number;
+  qrels_path: string;
+  queries_path: string;
+  top_k: number;
+  num_queries: number;
+  mrr: number;
+  ndcg_at: MetricPoint[];
+  recall_at: MetricPoint[];
+  worst_queries: DebugQueryEvalRow[];
+};
 
 type MetricPoint = {
-  k: number
-  value: number
-}
+  k: number;
+  value: number;
+};
 
 type DebugQueryEvalRow = {
-  query_id: string
-  query: string
-  reciprocal_rank: number
-  first_relevant_rank: number | null
-  ndcg_at_top_k: number
-  recall_at_top_k: number
-  returned_relevant: string[]
-  missed_relevant: string[]
-}
+  query_id: string;
+  query: string;
+  reciprocal_rank: number;
+  first_relevant_rank: number | null;
+  ndcg_at_top_k: number;
+  recall_at_top_k: number;
+  returned_relevant: string[];
+  missed_relevant: string[];
+};
 
-const palette = {
-  canvas: "#0B0B0B",
-  panel: "#111111",
-  panelAlt: "#161628",
-  border: "#2B396D",
-  borderFocus: "#4a5a9d",
-  selection: "#2B396D",
-  text: "#E4E4E4",
-  muted: "#9090a0",
-  accent: "#E4E4E4",
-  danger: "#ff8a5b",
-  success: "#7bd389",
-}
+type Palette = {
+  BG: string;
+  SURFACE: string;
+  SURFACE_RAISED: string;
+  BORDER: string;
+  BORDER_VIS: string;
+  TEXT_DIM: string;
+  TEXT_SEC: string;
+  TEXT_PRI: string;
+  TEXT_DISP: string;
+  ACCENT: string;
+  ACCENT_RED: string;
+  UTIL_ORANGE: string;
+  SUCCESS: string;
+  WARNING: string;
+  INFO: string;
+};
 
-const apiBase = process.env.RETRIEVAL_XRAY_API_URL ?? "http://127.0.0.1:3000"
-const qrelsPath = process.env.RETRIEVAL_XRAY_QRELS ?? ""
-const queriesPath = process.env.RETRIEVAL_XRAY_QUERIES ?? ""
-const kValues = process.env.RETRIEVAL_XRAY_K ?? "1,3,5,10"
-const configPath = process.env.SEARCH_ENGINE_CONFIG_PATH ?? "config.toml"
+const DARK: Palette = {
+  BG: "#0B0D10",
+  SURFACE: "#14171C",
+  SURFACE_RAISED: "#1C2026",
+  BORDER: "#262B33",
+  BORDER_VIS: "#4DA3FF",
+  TEXT_DIM: "#6B7280",
+  TEXT_SEC: "#A0A8B4",
+  TEXT_PRI: "#E5E9F0",
+  TEXT_DISP: "#FFFFFF",
+  ACCENT: "#4DA3FF",
+  ACCENT_RED: "#FF5C5C",
+  UTIL_ORANGE: "#F2A65A",
+  SUCCESS: "#5CD68F",
+  WARNING: "#F2C94C",
+  INFO: "#4DA3FF",
+};
+
+const LIGHT: Palette = {
+  BG: "#F7F8FA",
+  SURFACE: "#FFFFFF",
+  SURFACE_RAISED: "#EEF1F5",
+  BORDER: "#3A4250",
+  BORDER_VIS: "#1F6FEB",
+  TEXT_DIM: "#6B7280",
+  TEXT_SEC: "#374151",
+  TEXT_PRI: "#0F1623",
+  TEXT_DISP: "#000000",
+  ACCENT: "#1F6FEB",
+  ACCENT_RED: "#D7263D",
+  UTIL_ORANGE: "#E07A1F",
+  SUCCESS: "#1B7A45",
+  WARNING: "#9A6B00",
+  INFO: "#1F6FEB",
+};
+
+type ThemeMode = "dark" | "light";
+type StatusTone = "neutral" | "success" | "warning";
+type ViewMode = "normal" | "detail" | "metrics" | "help";
+
+const RISK_HELP: Record<string, string> = {
+  heading_mismatch: "Query terms align with body text but miss heading intent.",
+  semantic_confusion:
+    "Dense retrieval is high while lexical/structure evidence is weak.",
+  context_fragmentation:
+    "Partial chunk match likely missing surrounding context.",
+  lexical_overfit: "Strong exact term match with weak semantic alignment.",
+  authority_bias: "Ranking gain is dominated by host authority boost.",
+};
+
+const apiBase = process.env.RETRIEVAL_XRAY_API_URL ?? "http://127.0.0.1:3000";
+const qrelsPath =
+  process.env.RETRIEVAL_XRAY_QRELS ?? "benchmarks/niche_db/qrels_100.tsv";
+const queriesPath =
+  process.env.RETRIEVAL_XRAY_QUERIES ?? "benchmarks/niche_db/queries_100.tsv";
+const kValues = process.env.RETRIEVAL_XRAY_K ?? "1,3,5,10";
 const initialQuery =
   process.argv.slice(2).join(" ") ||
   process.env.RETRIEVAL_XRAY_INITIAL_QUERY ||
-  "rust lifetime elision rules"
+  "";
+
+let themeMode: ThemeMode = "dark";
+let palette: Palette = DARK;
+
+const queryHistory: string[] = [];
+let historyIndex = -1; // -1 = current draft, not navigating history
+let historyDraft = "";
+
+let currentSearch: DebugSearchResponse | null = null;
+let currentEval: DebugEvalResponse | null = null;
+let searchAbort: AbortController | null = null;
+let evalAbort: AbortController | null = null;
+let searchSeq = 0;
+let evalSeq = 0;
+let focusedIndex = 0;
+let viewMode: ViewMode = "normal";
+let lastStatus = "Ready. Type a query and press Enter.";
+let lastTone: StatusTone = "neutral";
 
 const renderer = await createCliRenderer({
   exitOnCtrlC: true,
-  targetFps: 30,
-  backgroundColor: palette.canvas,
-})
+  targetFps: 20,
+  backgroundColor: palette.BG,
+});
 
 const app = new BoxRenderable(renderer, {
   id: "app",
-  flexGrow: 1,
+  width: "100%",
+  height: "100%",
   flexDirection: "column",
   padding: 1,
   gap: 1,
-  backgroundColor: palette.canvas,
-})
+  backgroundColor: palette.BG,
+});
 
-renderer.root.add(app)
+renderer.root.add(app);
 
-const headerBox = new BoxRenderable(renderer, {
-  id: "header",
-  height: 3,
-  flexShrink: 0,
-  flexDirection: "row",
-  alignItems: "center",
-  justifyContent: "space-between",
-  border: true,
-  borderStyle: "rounded",
-  borderColor: palette.border,
-  backgroundColor: palette.panel,
-  paddingX: 1,
-})
-const headerTitle = new TextRenderable(renderer, {
-  id: "header-title",
-  content: "Retrieval X-Ray | neural retrieval debugger",
-  fg: palette.text,
-})
-const headerStatus = new TextRenderable(renderer, {
-  id: "header-status",
-  content: "booting...",
-  fg: palette.muted,
-})
-headerBox.add(headerTitle)
-headerBox.add(headerStatus)
+function makeCard(id: string, title: string, flexGrow = 1): BoxRenderable {
+  return new BoxRenderable(renderer, {
+    id,
+    title,
+    border: true,
+    borderStyle: "rounded",
+    borderColor: palette.BORDER,
+    focusedBorderColor: palette.BORDER_VIS,
+    backgroundColor: palette.SURFACE,
+    paddingTop: 1,
+    paddingBottom: 1,
+    paddingLeft: 2,
+    paddingRight: 2,
+    flexGrow,
+    flexShrink: 1,
+  });
+}
 
-const queryBox = new BoxRenderable(renderer, {
-  id: "query-box",
-  height: 3,
-  flexShrink: 0,
-  border: true,
-  borderStyle: "rounded",
-  borderColor: palette.border,
-  focusedBorderColor: palette.borderFocus,
-  title: "Query | Enter to search",
-  backgroundColor: palette.panel,
-  paddingX: 1,
-  alignItems: "center",
-})
+const headerCard = makeCard("header", " Retrieval X-Ray ", 0);
+headerCard.height = 4;
+headerCard.flexShrink = 0;
+
+const headerText = new TextRenderable(renderer, {
+  id: "header-text",
+  content:
+    "Hybrid neural + lexical retrieval debugger  ·  Press ? for help  ·  Enter to search  ·  Ctrl+E to eval",
+  fg: palette.TEXT_SEC,
+  wrapMode: "word",
+  attributes: BOLD,
+});
+headerCard.add(headerText);
+
+const queryCard = makeCard("query", " Query ", 0);
+queryCard.height = 5;
+queryCard.flexShrink = 0;
+
 const queryInput = new InputRenderable(renderer, {
   id: "query-input",
-  flexGrow: 1,
-  placeholder: "Search retrieval behavior...",
   value: initialQuery,
-  backgroundColor: palette.panel,
-  focusedBackgroundColor: palette.panel,
-  textColor: palette.text,
-  focusedTextColor: palette.text,
-  placeholderColor: palette.muted,
-  cursorColor: palette.accent,
-})
-queryBox.add(queryInput)
+  placeholder:
+    "Type your query and press Enter   (e.g. wal_level postgresql configuration parameter)",
+  backgroundColor: palette.SURFACE_RAISED,
+  focusedBackgroundColor: palette.SURFACE_RAISED,
+  textColor: palette.TEXT_PRI,
+  focusedTextColor: palette.TEXT_DISP,
+  placeholderColor: palette.TEXT_DIM,
+  cursorColor: palette.TEXT_DISP,
+  flexShrink: 0,
+});
 
-const bodyRow = new BoxRenderable(renderer, {
-  id: "body-row",
+const queryHint = new TextRenderable(renderer, {
+  id: "query-hint",
+  content:
+    "↵ Search   ·   Ctrl+E Run eval   ·   Ctrl+R Re-run   ·   Ctrl+T Toggle theme",
+  fg: palette.TEXT_DIM,
+  wrapMode: "word",
   flexGrow: 1,
+  attributes: BOLD,
+});
+
+queryCard.add(queryInput);
+queryCard.add(queryHint);
+
+const mainRow = new BoxRenderable(renderer, {
+  id: "main-row",
   flexDirection: "row",
   gap: 1,
-})
+  flexGrow: 1,
+  backgroundColor: palette.BG,
+});
 
-const resultsPane = new BoxRenderable(renderer, {
-  id: "results-pane",
-  width: 40,
-  flexShrink: 0,
-  border: true,
-  borderStyle: "rounded",
-  borderColor: palette.border,
-  focusedBorderColor: palette.borderFocus,
-  title: "Ranking",
-  backgroundColor: palette.panel,
-})
+const resultsCard = makeCard("results", " Ranking ", 0);
+resultsCard.width = Math.max(
+  34,
+  Math.floor((process.stdout.columns || 120) * 0.32),
+);
+resultsCard.flexShrink = 0;
+
+const detailsCard = makeCard("details", " Chunk Detail ", 1);
+
 const resultsList = new SelectRenderable(renderer, {
   id: "results-list",
-  flexGrow: 1,
   options: [],
-  backgroundColor: palette.panel,
-  focusedBackgroundColor: palette.panelAlt,
-  textColor: palette.text,
-  focusedTextColor: palette.text,
-  selectedBackgroundColor: palette.selection,
-  selectedTextColor: palette.text,
-  descriptionColor: palette.muted,
-  selectedDescriptionColor: palette.text,
+  flexGrow: 1,
+  backgroundColor: palette.SURFACE,
+  focusedBackgroundColor: palette.SURFACE,
+  textColor: palette.TEXT_PRI,
+  focusedTextColor: palette.TEXT_PRI,
+  selectedBackgroundColor: palette.SURFACE_RAISED,
+  selectedTextColor: palette.TEXT_DISP,
+  descriptionColor: palette.TEXT_DIM,
+  selectedDescriptionColor: palette.TEXT_SEC,
   showDescription: true,
   showScrollIndicator: true,
   wrapSelection: true,
-})
-resultsPane.add(resultsList)
+});
 
-const detailPane = new BoxRenderable(renderer, {
-  id: "detail-pane",
-  flexGrow: 1,
-  border: true,
-  borderStyle: "rounded",
-  borderColor: palette.border,
-  focusedBorderColor: palette.borderFocus,
-  title: "Chunk detail",
-  backgroundColor: palette.panel,
-})
-const detailScroll = new ScrollBoxRenderable(renderer, {
-  id: "detail-scroll",
+resultsCard.add(resultsList);
+
+const detailsScroll = new ScrollBoxRenderable(renderer, {
+  id: "details-scroll",
   flexGrow: 1,
   scrollY: true,
   scrollX: false,
   contentOptions: {
     flexDirection: "column",
-    padding: 1,
-    backgroundColor: palette.panel,
+    padding: 0,
+    backgroundColor: palette.SURFACE,
   },
-})
-const detailText = new TextRenderable(renderer, {
-  id: "detail-text",
-  content: "Run a query to inspect how dense, lexical, and structural signals combine.",
+});
+
+const detailsText = new TextRenderable(renderer, {
+  id: "details-text",
+  content:
+    "  Run a search, then select a result to inspect chunk-level score signals.",
+  fg: palette.TEXT_PRI,
   wrapMode: "word",
-  fg: palette.text,
-})
-detailScroll.add(detailText)
-detailPane.add(detailScroll)
+  attributes: BOLD,
+});
 
-const sideColumn = new BoxRenderable(renderer, {
-  id: "side-column",
-  width: 38,
-  flexShrink: 0,
-  flexDirection: "column",
+detailsScroll.add(detailsText);
+detailsCard.add(detailsScroll);
+
+mainRow.add(resultsCard);
+mainRow.add(detailsCard);
+
+const bottomRow = new BoxRenderable(renderer, {
+  id: "bottom-row",
+  flexDirection: "row",
   gap: 1,
-})
-
-const summaryPane = new BoxRenderable(renderer, {
-  id: "summary-pane",
-  height: 18,
+  height: 14,
   flexShrink: 0,
-  border: true,
-  borderStyle: "rounded",
-  borderColor: palette.border,
-  title: "Query summary",
-  backgroundColor: palette.panel,
-})
-const summaryScroll = new ScrollBoxRenderable(renderer, {
-  id: "summary-scroll",
-  flexGrow: 1,
-  scrollY: true,
-  scrollX: false,
-  contentOptions: {
-    flexDirection: "column",
-    padding: 1,
-    backgroundColor: palette.panel,
-  },
-})
+  backgroundColor: palette.BG,
+});
+
+const summaryCard = makeCard("summary", " Search Summary ", 1);
+const evalCard = makeCard("eval", " Eval Metrics ", 1);
+const riskCard = makeCard("risk", " Risk Signals ", 1);
+
 const summaryText = new TextRenderable(renderer, {
   id: "summary-text",
-  content: "Waiting for the first retrieval run.",
+  content: "No search yet.\n\nType a query above and press Enter\nto populate this panel.",
+  fg: palette.TEXT_PRI,
   wrapMode: "word",
-  fg: palette.text,
-})
-summaryScroll.add(summaryText)
-summaryPane.add(summaryScroll)
+  attributes: BOLD,
+});
+summaryCard.add(summaryText);
 
-const evalPane = new BoxRenderable(renderer, {
-  id: "eval-pane",
-  flexGrow: 1,
-  border: true,
-  borderStyle: "rounded",
-  borderColor: palette.border,
-  title: "Evaluation",
-  backgroundColor: palette.panel,
-})
-const evalScroll = new ScrollBoxRenderable(renderer, {
-  id: "eval-scroll",
-  flexGrow: 1,
-  scrollY: true,
-  scrollX: false,
-  contentOptions: {
-    flexDirection: "column",
-    padding: 1,
-    backgroundColor: palette.panel,
-  },
-})
 const evalText = new TextRenderable(renderer, {
   id: "eval-text",
-  content: "Evaluation is optional. Set RETRIEVAL_XRAY_QRELS and RETRIEVAL_XRAY_QUERIES, then press Ctrl+E.",
+  content: "LIVE QUERY\n  Run a search to populate live metrics.\n\nBATCH EVAL  (Ctrl+E)\n  Not run yet — press Ctrl+E",
+  fg: palette.TEXT_PRI,
   wrapMode: "word",
-  fg: palette.text,
-})
-evalScroll.add(evalText)
-evalPane.add(evalScroll)
+  height: 7,
+  flexShrink: 0,
+  attributes: BOLD,
+});
 
-sideColumn.add(summaryPane)
-sideColumn.add(evalPane)
+const evalBars = new FrameBufferRenderable(renderer, {
+  id: "eval-bars",
+  width: 36,
+  height: 4,
+  flexShrink: 0,
+});
 
-bodyRow.add(resultsPane)
-bodyRow.add(detailPane)
-bodyRow.add(sideColumn)
+evalCard.add(evalText);
+evalCard.add(evalBars);
 
-const footerBox = new BoxRenderable(renderer, {
-  id: "footer",
+const riskText = new TextRenderable(renderer, {
+  id: "risk-text",
+  content: "No search yet.\n\nRun a query to surface risk signals.",
+  fg: palette.TEXT_PRI,
+  wrapMode: "word",
+  height: 7,
+  flexShrink: 0,
+  attributes: BOLD,
+});
+
+const riskBars = new FrameBufferRenderable(renderer, {
+  id: "risk-bars",
+  width: 28,
   height: 3,
+  flexShrink: 0,
+});
+
+const helpCard = makeCard("help", " Help & Glossary ", 0);
+helpCard.height = 14;
+helpCard.flexGrow = 1;
+helpCard.flexShrink = 0;
+helpCard.visible = false;
+
+const helpText = new TextRenderable(renderer, {
+  id: "help-text",
+  fg: palette.TEXT_PRI,
+  wrapMode: "word",
+  attributes: BOLD,
+  content: (() => {
+    const div = "─".repeat(56);
+    return [
+      "  KEYBOARD SHORTCUTS",
+      `  ${div}`,
+      "    Enter         Run search on the current query",
+      "    Ctrl+R        Re-run the last query",
+      "    Ctrl+E        Run batch evaluation (qrels + queries)",
+      "    Ctrl+T        Toggle dark / light theme",
+      "    Ctrl+P / N    Previous / next query in history",
+      "    ↑ / ↓         Move selection in the ranking list",
+      "    Tab / S-Tab   Cycle focus between panels",
+      "    N / D / M     Switch view: Normal · Detail · Metrics",
+      "    ?             Toggle this help panel",
+      "    /             Focus query input from anywhere",
+      "    C             Copy selected result URL to clipboard",
+      "    Esc / Q       Quit",
+      "",
+      "  LIVE QUERY METRICS",
+      `  ${div}`,
+      "    top           Top-1 final score",
+      "    gap           Score gap between top-1 and top-2 (confidence)",
+      "    vec / lex     Average vector & lexical evidence",
+      "    share         Fraction of hits dominated by dense vs lex",
+      "    phrase        Count of exact-phrase boosted hits",
+      "    authority     Count of hits with authority bonus applied",
+      "",
+      "  BATCH EVAL METRICS  (Ctrl+E)",
+      `  ${div}`,
+      "    MRR                  Mean reciprocal rank",
+      "    NDCG@1/3/5/10        Graded ranking quality at cutoffs",
+      "    Recall@1/3/5/10      Fraction of relevant docs retrieved",
+      "",
+      "  RISK LABELS",
+      `  ${div}`,
+      "    heading_mismatch        Heading intent mismatch",
+      "    semantic_confusion      Dense > lexical mismatch",
+      "    context_fragmentation   Missing surrounding context",
+      "    lexical_overfit         Exact-term over-reliance",
+      "    authority_bias          Authority bonus dominates ranking",
+    ].join("\n");
+  })(),
+});
+helpCard.add(helpText);
+
+riskCard.add(riskText);
+riskCard.add(riskBars);
+
+bottomRow.add(summaryCard);
+bottomRow.add(evalCard);
+bottomRow.add(riskCard);
+
+const statusBar = new BoxRenderable(renderer, {
+  id: "status",
+  height: 4,
   flexShrink: 0,
   border: true,
   borderStyle: "rounded",
-  borderColor: palette.border,
-  backgroundColor: palette.panel,
-  paddingX: 1,
-  alignItems: "center",
-})
-const footerText = new TextRenderable(renderer, {
-  id: "footer-text",
-  content:
-    "Tab focus | Enter search | arrows/jk navigate | Ctrl+L focus query | Ctrl+R rerun | Ctrl+E eval | Esc quit",
+  borderColor: palette.BORDER,
+  backgroundColor: palette.SURFACE_RAISED,
+  paddingLeft: 2,
+  paddingRight: 2,
+  flexDirection: "column",
+});
+
+const keysText = new TextRenderable(renderer, {
+  id: "keys-text",
+  content: "",
+  fg: palette.TEXT_DIM,
   wrapMode: "word",
-  fg: palette.muted,
-})
-footerBox.add(footerText)
+  attributes: BOLD,
+});
 
-app.add(headerBox)
-app.add(queryBox)
-app.add(bodyRow)
-app.add(footerBox)
+const statusText = new TextRenderable(renderer, {
+  id: "status-text",
+  content: "",
+  fg: palette.TEXT_SEC,
+  wrapMode: "word",
+  attributes: BOLD,
+});
+statusBar.add(keysText);
+statusBar.add(statusText);
 
-const focusRing = [queryInput, resultsList, detailScroll, evalScroll]
-let focusIndex = 0
-let currentSearch: DebugSearchResponse | null = null
-let currentEval: DebugEvalResponse | null = null
-let searchSequence = 0
-let evalSequence = 0
-let searchAbort: AbortController | null = null
-let evalAbort: AbortController | null = null
+app.add(headerCard);
+app.add(queryCard);
+app.add(mainRow);
+app.add(bottomRow);
+app.add(helpCard);
+app.add(statusBar);
 
-function setStatus(message: string): void {
-  headerStatus.content = `${message} | ${configPath}`
+const focusTargets = [
+  { box: queryCard, focus: queryInput },
+  { box: resultsCard, focus: resultsList },
+  { box: detailsCard, focus: detailsScroll },
+];
+
+const allCards = [
+  headerCard,
+  queryCard,
+  resultsCard,
+  detailsCard,
+  summaryCard,
+  evalCard,
+  riskCard,
+  helpCard,
+  statusBar,
+];
+
+const allPlainText = [
+  headerText,
+  queryHint,
+  detailsText,
+  summaryText,
+  evalText,
+  riskText,
+];
+
+function rgba(hex: string): RGBA {
+  return RGBA.fromHex(hex);
 }
 
-function resizePanels(width: number): void {
-  resultsPane.width = Math.max(34, Math.min(46, Math.floor(width * 0.29)))
-  sideColumn.width = Math.max(34, Math.min(40, Math.floor(width * 0.27)))
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function truncate(text: string, max: number): string {
-  if (text.length <= max) {
-    return text
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 1))}…`;
+}
+
+function score(value: number): string {
+  return Number.isFinite(value) ? value.toFixed(3) : "0.000";
+}
+
+function metric(points: MetricPoint[], k: number): number {
+  return (
+    points.find((point) => point.k === k)?.value ?? points.at(-1)?.value ?? 0
+  );
+}
+
+function selectedHit(): DebugHit | null {
+  return (resultsList.getSelectedOption()?.value ?? null) as DebugHit | null;
+}
+
+function setStatus(message: string, tone: StatusTone = "neutral"): void {
+  lastStatus = message;
+  lastTone = tone;
+  renderStatus();
+}
+
+function renderStatus(): void {
+  const themeLabel = themeMode === "dark" ? "Dark" : "Light";
+  const viewLabel =
+    viewMode === "normal"
+      ? "Normal"
+      : viewMode === "detail"
+        ? "Detail"
+        : viewMode === "metrics"
+          ? "Metrics"
+          : "Help";
+
+  keysText.content =
+    `${themeLabel} · ${viewLabel}   │   ` +
+    "↵ search   / focus   Ctrl+P/N history   Ctrl+E eval   Ctrl+R rerun   ↑↓ select   ? help   Esc quit";
+
+  const icon =
+    lastTone === "success" ? "✓" : lastTone === "warning" ? "!" : "›";
+  statusText.content = `${icon}  ${lastStatus}`;
+  statusText.fg =
+    lastTone === "success"
+      ? palette.SUCCESS
+      : lastTone === "warning"
+        ? palette.WARNING
+        : palette.TEXT_PRI;
+}
+
+function focus(index: number): void {
+  focusedIndex = (index + focusTargets.length) % focusTargets.length;
+
+  for (const card of allCards) {
+    card.borderColor = palette.BORDER;
   }
-  return `${text.slice(0, Math.max(0, max - 3))}...`
+
+  const target = focusTargets[focusedIndex];
+  target.box.borderColor = palette.BORDER_VIS;
+  target.focus.focus();
 }
 
-function formatScore(value: number): string {
-  return value.toFixed(3)
+function focusNext(direction: 1 | -1): void {
+  focus(focusedIndex + direction);
 }
 
-function formatListHeading(hit: DebugHit): string {
-  const heading = hit.heading_chain.at(-1) || hit.host || hit.display_url
-  return truncate(heading, 34)
+function drawEmptyCanvas(canvas: FrameBufferRenderable): void {
+  const fb = canvas.frameBuffer;
+  const bg = rgba(palette.SURFACE);
+  const dim = rgba(palette.TEXT_DIM);
+
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      fb.setCell(x, y, " ", dim, bg);
+    }
+  }
 }
 
-function buildResultOptions(results: DebugHit[]): SelectOption[] {
-  return results.map((hit) => ({
-    name: `#${hit.rank} ${formatScore(hit.score_breakdown.final_score)} ${formatListHeading(hit)}`,
-    description: `${truncate(hit.display_url, 28)} | v ${formatScore(hit.score_breakdown.vector_score)} | l ${formatScore(hit.score_breakdown.lexical_score)}`,
+function drawBars(
+  canvas: FrameBufferRenderable,
+  rows: Array<[string, number]>,
+  colorHex: string,
+): void {
+  const fb = canvas.frameBuffer;
+  const bg = rgba(palette.SURFACE);
+  const dim = rgba(palette.TEXT_DIM);
+  const sec = rgba(palette.TEXT_SEC);
+  const fill = rgba(colorHex);
+
+  drawEmptyCanvas(canvas);
+
+  rows.slice(0, canvas.height).forEach(([label, value], y) => {
+    const labelWidth = 9;
+    const valueWidth = 5;
+    const barX = labelWidth;
+    const barWidth = Math.max(4, canvas.width - barX - valueWidth - 1);
+    const safeValue = clamp(value, 0, 1);
+    const filled = Math.round(barWidth * safeValue);
+
+    fb.drawText(truncate(label.padEnd(labelWidth - 1, " "), labelWidth - 1), 0, y, sec, bg);
+
+    for (let x = 0; x < barWidth; x++) {
+      fb.setCell(
+        barX + x,
+        y,
+        x < filled ? "█" : "·",
+        x < filled ? fill : dim,
+        bg,
+      );
+    }
+
+    fb.drawText(safeValue.toFixed(2).padStart(valueWidth, " "), barX + barWidth + 1, y, sec, bg);
+  });
+}
+
+function updateCanvases(): void {
+  const live = currentSearch;
+  drawBars(
+    evalBars,
+    [
+      ["hits", live ? clamp(live.result_count / 10, 0, 1) : 0],
+      ["gap", live ? clamp(live.summary.score_gap_top1_top2, 0, 1) : 0],
+      ["vec", live ? clamp(live.summary.avg_vector_score, 0, 1) : 0],
+      ["lex", live ? clamp(live.summary.avg_lexical_score, 0, 1) : 0],
+    ],
+    palette.SUCCESS,
+  );
+
+  const riskCount =
+    currentSearch?.summary.risk_counts.reduce(
+      (sum, risk) => sum + risk.count,
+      0,
+    ) ?? 0;
+  const riskLevel = currentSearch
+    ? clamp(riskCount / Math.max(1, currentSearch.result_count), 0, 1)
+    : 0;
+
+  drawBars(
+    riskBars,
+    [
+      ["risk", riskLevel],
+      ["gap", currentSearch?.summary.score_gap_top1_top2 ?? 0],
+      ["miss", selectedHit()?.missing_terms.length ? 1 : 0],
+    ],
+    palette.ACCENT_RED,
+  );
+}
+
+function buildOption(hit: DebugHit): SelectOption {
+  const heading = hit.heading_chain.at(-1) || hit.host || hit.display_url;
+  const rank = String(hit.rank).padStart(2, " ");
+  const finalScore = score(hit.score_breakdown.final_score);
+  const vec = score(hit.score_breakdown.vector_score);
+  const lex = score(hit.score_breakdown.lexical_score);
+  const flags: string[] = [];
+  if (hit.score_breakdown.exact_heading_phrase || hit.score_breakdown.exact_body_phrase)
+    flags.push("◆");
+  if (hit.score_breakdown.authority_bonus > 0) flags.push("★");
+  if (hit.diagnostics.length > 0) flags.push("⚠");
+  const flagStr = flags.length ? ` ${flags.join("")}` : "";
+
+  return {
+    name: `${rank}.  ${finalScore}  ${truncate(heading, 38)}${flagStr}`,
+    description: `      vec ${vec}   lex ${lex}   ${truncate(hit.display_url, 44)}`,
     value: hit,
-  }))
+  };
 }
 
-function formatSummary(search: DebugSearchResponse | null, selected: DebugHit | null): string {
+function formatSummary(search: DebugSearchResponse | null): string {
   if (!search) {
-    return "Waiting for the first retrieval run."
+    return [
+      "No search yet.",
+      "",
+      "Type a query above and press Enter",
+      "to populate this panel.",
+    ].join("\n");
   }
 
-  const summary = search.summary
-  const riskLines =
-    summary.risk_counts.length === 0
-      ? ["- no obvious risk heuristics triggered"]
-      : summary.risk_counts.slice(0, 5).map((risk) => `- ${risk.label}: ${risk.count}`)
-
-  const selectedLines = selected
-    ? [
-        "",
-        "Selected hit",
-        `- rank: #${selected.rank}`,
-        `- host: ${selected.host || "n/a"}`,
-        `- matched terms: ${selected.matched_terms.join(", ") || "none"}`,
-        `- missing terms: ${selected.missing_terms.join(", ") || "none"}`,
-        `- diagnostics: ${selected.diagnostics.map((item) => item.label).join(", ") || "none"}`,
-      ]
-    : []
+  const s = search.summary;
+  const pad = (k: string) => k.padEnd(11, " ");
 
   return [
-    `Query: ${search.query || "(empty)"}`,
-    `Mode: ${summary.short_query ? "short" : "long"} (${summary.query_terms.length} terms)` ,
-    `Latency: ${search.elapsed_ms} ms`,
-    `Hits: ${search.result_count}`,
-    `Host diversity: ${summary.host_diversity}`,
-    `Top score gap: ${formatScore(summary.score_gap_top1_top2)}`,
-    `Avg vector / lexical: ${formatScore(summary.avg_vector_score)} / ${formatScore(summary.avg_lexical_score)}`,
-    `Avg heading / body overlap: ${formatScore(summary.avg_heading_overlap)} / ${formatScore(summary.avg_body_overlap)}`,
-    `Dense dominant hits: ${summary.dense_dominant_hits}`,
-    `Lexical dominant hits: ${summary.lexical_dominant_hits}`,
-    `Authority boosted hits: ${summary.authority_boosted_hits}`,
-    `Exact phrase hits: ${summary.exact_phrase_hits}`,
+    `${pad("Query")} ${truncate(search.query, 40)}`,
+    `${pad("Latency")} ${search.elapsed_ms} ms`,
+    `${pad("Hits")} ${search.result_count}`,
+    `${pad("Terms")} ${s.query_terms.join(", ") || "—"}`,
     "",
-    "Risk counts",
-    ...riskLines,
-    ...selectedLines,
-  ].join("\n")
+    `${pad("Top gap")} ${score(s.score_gap_top1_top2)}`,
+    `${pad("Avg vec")} ${score(s.avg_vector_score)}`,
+    `${pad("Avg lex")} ${score(s.avg_lexical_score)}`,
+    `${pad("Dense dom")} ${s.dense_dominant_hits}`,
+    `${pad("Lex dom")} ${s.lexical_dominant_hits}`,
+    `${pad("Phrase")} ${s.exact_phrase_hits}`,
+  ].join("\n");
 }
 
 function formatDetail(hit: DebugHit | null): string {
   if (!hit) {
-    return "Select a ranked chunk to inspect score decomposition, coverage, and failure signals."
+    return [
+      "Select a result on the left to inspect its score breakdown.",
+      "",
+      "Use ↑ / ↓ to move through the ranking.",
+    ].join("\n");
   }
+
+  const b = hit.score_breakdown;
+  const div = "─".repeat(48);
 
   const diagnostics =
     hit.diagnostics.length === 0
-      ? ["- no diagnostic heuristics triggered"]
-      : hit.diagnostics.map((item) => `- ${item.label}: ${item.reason}`)
-  const heading = hit.heading_chain.length > 0 ? hit.heading_chain.join(" > ") : "(no heading chain)"
+      ? ["  (none)"]
+      : hit.diagnostics.map((item) => `  • ${item.label} — ${item.reason}`);
+
+  const scoreRow = (label: string, raw: number, contrib?: number): string => {
+    const rawStr = score(raw).padStart(6, " ");
+    const contribStr =
+      contrib === undefined ? "" : `   →  ${score(contrib).padStart(6, " ")}`;
+    return `  ${label.padEnd(11, " ")} ${rawStr}${contribStr}`;
+  };
 
   return [
-    `Rank #${hit.rank}`,
-    `Chunk: ${hit.chunk_id}`,
-    `Host: ${hit.host || "n/a"}`,
-    `URL: ${hit.source_url}`,
-    `Heading: ${heading}`,
-    `Matched terms: ${hit.matched_terms.join(", ") || "none"}`,
-    `Missing terms: ${hit.missing_terms.join(", ") || "none"}`,
+    `  Rank  #${hit.rank}     Final score  ${score(b.final_score)}`,
+    `  Chunk    ${hit.chunk_id}`,
+    `  Host     ${hit.host || "—"}`,
+    `  URL      ${hit.source_url}`,
+    `  Heading  ${hit.heading_chain.join(" › ") || "—"}`,
     "",
-    "Score decomposition",
-    `- final score: ${formatScore(hit.score_breakdown.final_score)}`,
-    `- vector: ${formatScore(hit.score_breakdown.vector_score)} x contribution ${formatScore(hit.score_breakdown.vector_contribution)}`,
-    `- lexical: ${formatScore(hit.score_breakdown.lexical_score)} x contribution ${formatScore(hit.score_breakdown.lexical_contribution)}`,
-    `- title overlap: ${formatScore(hit.score_breakdown.title_overlap)} x contribution ${formatScore(hit.score_breakdown.title_contribution)}`,
-    `- heading overlap: ${formatScore(hit.score_breakdown.heading_overlap)} x contribution ${formatScore(hit.score_breakdown.heading_contribution)}`,
-    `- body overlap: ${formatScore(hit.score_breakdown.body_overlap)} x contribution ${formatScore(hit.score_breakdown.body_contribution)}`,
-    `- base total: ${formatScore(hit.score_breakdown.base_total)}`,
-    `- phrase bonus: ${formatScore(hit.score_breakdown.phrase_bonus)}`,
-    `- penalty multiplier: ${formatScore(hit.score_breakdown.penalty_multiplier)}`,
-    `- pre-authority score: ${formatScore(hit.score_breakdown.pre_authority_score)}`,
-    `- authority bonus: ${formatScore(hit.score_breakdown.authority_bonus)}`,
-    `- dense minus lexical: ${formatScore(hit.score_breakdown.dense_minus_lexical)}`,
-    `- reconstruction gap: ${formatScore(hit.score_breakdown.reconstruction_gap)}`,
-    `- exact heading phrase: ${hit.score_breakdown.exact_heading_phrase ? "yes" : "no"}`,
-    `- exact body phrase: ${hit.score_breakdown.exact_body_phrase ? "yes" : "no"}`,
+    `  TERM COVERAGE`,
+    `  ${div}`,
+    `    Matched   ${hit.matched_terms.join(", ") || "—"}`,
+    `    Missing   ${hit.missing_terms.join(", ") || "—"}`,
     "",
-    "Diagnostics",
+    `  SCORE BREAKDOWN              raw         contribution`,
+    `  ${div}`,
+    scoreRow("vector", b.vector_score, b.vector_contribution),
+    scoreRow("lexical", b.lexical_score, b.lexical_contribution),
+    scoreRow("title", b.title_overlap, b.title_contribution),
+    scoreRow("heading", b.heading_overlap, b.heading_contribution),
+    scoreRow("body", b.body_overlap, b.body_contribution),
+    "",
+    scoreRow("phrase+", b.phrase_bonus),
+    scoreRow("authority", b.authority_bonus),
+    scoreRow("penalty×", b.penalty_multiplier),
+    "",
+    `  DIAGNOSTICS`,
+    `  ${div}`,
     ...diagnostics,
     "",
-    "Chunk text",
-    hit.text,
-  ].join("\n")
+    `  PREVIEW`,
+    `  ${div}`,
+    `  ${(hit.preview || hit.text).split("\n").join("\n  ")}`,
+  ].join("\n");
 }
 
-function formatMetricSeries(label: string, points: MetricPoint[]): string[] {
-  if (points.length === 0) {
-    return [`${label}: n/a`]
-  }
+function formatEval(report: DebugEvalResponse | null): string {
+  const liveSection = (() => {
+    if (!currentSearch) {
+      return [
+        "LIVE QUERY",
+        "  Run a search to populate live metrics.",
+      ].join("\n");
+    }
 
-  return [
-    `${label}: ${points.map((point) => `@${point.k} ${point.value.toFixed(3)}`).join(" | ")}`,
-  ]
+    const s = currentSearch.summary;
+    const top = currentSearch.results[0]?.score_breakdown.final_score ?? 0;
+    const lexicalShare =
+      s.lexical_dominant_hits / Math.max(1, currentSearch.result_count);
+    const denseShare =
+      s.dense_dominant_hits / Math.max(1, currentSearch.result_count);
+
+    return [
+      "LIVE QUERY",
+      `  Query    ${truncate(currentSearch.query, 52)}`,
+      `  Hits     ${String(currentSearch.result_count).padEnd(4)}  Latency  ${currentSearch.elapsed_ms} ms`,
+      `  Top      ${score(top).padEnd(6)}  Gap      ${score(s.score_gap_top1_top2)}`,
+      `  Avg      vec ${score(s.avg_vector_score)}   lex ${score(s.avg_lexical_score)}`,
+      `  Share    dense ${denseShare.toFixed(2)}    lex ${lexicalShare.toFixed(2)}`,
+      `  Phrase   ${String(s.exact_phrase_hits).padEnd(4)}  Authority ${s.authority_boosted_hits}`,
+    ].join("\n");
+  })();
+
+  const fmt = (value: number | null): string =>
+    value === null ? "  —  " : value.toFixed(3);
+
+  const batchSection = (() => {
+    const mrr = report ? report.mrr.toFixed(4) : "  —   ";
+    const ndcg1 = report ? fmt(metric(report.ndcg_at, 1)) : "  —  ";
+    const ndcg3 = report ? fmt(metric(report.ndcg_at, 3)) : "  —  ";
+    const ndcg5 = report ? fmt(metric(report.ndcg_at, 5)) : "  —  ";
+    const ndcg10 = report ? fmt(metric(report.ndcg_at, 10)) : "  —  ";
+    const rec1 = report ? fmt(metric(report.recall_at, 1)) : "  —  ";
+    const rec3 = report ? fmt(metric(report.recall_at, 3)) : "  —  ";
+    const rec5 = report ? fmt(metric(report.recall_at, 5)) : "  —  ";
+    const rec10 = report ? fmt(metric(report.recall_at, 10)) : "  —  ";
+
+    const header = report
+      ? `  ${report.num_queries} queries in ${report.elapsed_ms} ms`
+      : "  Not run yet — press Ctrl+E";
+
+    return [
+      "BATCH EVAL  (Ctrl+E)",
+      header,
+      `  MRR       ${mrr}`,
+      `  NDCG      @1 ${ndcg1}   @3 ${ndcg3}   @5 ${ndcg5}   @10 ${ndcg10}`,
+      `  Recall    @1 ${rec1}   @3 ${rec3}   @5 ${rec5}   @10 ${rec10}`,
+    ].join("\n");
+  })();
+
+  return [liveSection, "", batchSection].join("\n");
 }
 
-function formatEval(evalReport: DebugEvalResponse | null): string {
-  if (!qrelsPath || !queriesPath) {
-    return [
-      "Evaluation is not configured.",
-      "",
-      "Set both of these environment variables and press Ctrl+E:",
-      "- RETRIEVAL_XRAY_QRELS=/path/to/qrels.tsv",
-      "- RETRIEVAL_XRAY_QUERIES=/path/to/queries.tsv",
-    ].join("\n")
+function formatRisk(search: DebugSearchResponse | null): string {
+  if (!search) {
+    return ["No search yet.", "", "Run a query to surface risk signals."].join(
+      "\n",
+    );
   }
 
-  if (!evalReport) {
-    return [
-      `Qrels: ${qrelsPath}`,
-      `Queries: ${queriesPath}`,
-      "",
-      "Press Ctrl+E to load aggregate retrieval metrics.",
-    ].join("\n")
-  }
+  const risks = search.summary.risk_counts;
+  if (risks.length === 0) return "✓  No risk heuristics triggered.";
 
-  const worst =
-    evalReport.worst_queries.length === 0
-      ? ["- no judged query rows available"]
-      : evalReport.worst_queries.map(
-          (row) =>
-            `- ${row.query_id} | RR ${row.reciprocal_rank.toFixed(3)} | Recall ${row.recall_at_top_k.toFixed(3)} | ${truncate(row.query, 34)}`,
-        )
-
-  return [
-    `Qrels: ${evalReport.qrels_path}`,
-    `Queries: ${evalReport.queries_path}`,
-    `Elapsed: ${evalReport.elapsed_ms} ms`,
-    `Judged queries: ${evalReport.num_queries}`,
-    `MRR: ${evalReport.mrr.toFixed(3)}`,
-    ...formatMetricSeries("NDCG", evalReport.ndcg_at),
-    ...formatMetricSeries("Recall", evalReport.recall_at),
-    "",
-    "Worst queries",
-    ...worst,
-  ].join("\n")
+  return risks
+    .slice(0, 6)
+    .map((risk) => {
+      const detail =
+        RISK_HELP[risk.code] ||
+        RISK_HELP[risk.label.toLowerCase().replaceAll(" ", "_")] ||
+        "See ? help for explanation.";
+      return `⚠  ${risk.label}  (${risk.count})\n     ${detail}`;
+    })
+    .join("\n\n");
 }
 
 function applySearch(search: DebugSearchResponse): void {
-  currentSearch = search
-  resultsPane.title = `Ranking | ${search.result_count} hits`
-  resultsList.options = buildResultOptions(search.results)
+  currentSearch = search;
+  resultsCard.title = ` Ranking · ${search.result_count} hits `;
 
-  const selected = search.results[0] ?? null
   if (search.results.length > 0) {
-    resultsList.setSelectedIndex(0)
+    resultsList.options = search.results.map(buildOption);
+    resultsList.setSelectedIndex(0);
+    detailsText.content = formatDetail(selectedHit());
+  } else {
+    resultsList.options = [
+      {
+        name: "  No hits",
+        description: "  Try a benchmark query (see Chunk Detail panel)",
+        value: null,
+      },
+    ];
+    detailsText.content = [
+      "  No chunks matched this query.",
+      "",
+      "  The backend responded successfully but the current",
+      "  corpus / index did not return any candidates.",
+      "",
+      "  Try a benchmark-style query:",
+      "    • wal_level postgresql configuration parameter",
+      "    • full_page_writes postgres setting",
+      "    • shared_buffers configuration postgres",
+      "    • work_mem postgres parameter",
+    ].join("\n");
   }
-  detailText.content = formatDetail(selected)
-  detailPane.title = selected ? `Chunk detail | #${selected.rank}` : "Chunk detail"
-  summaryText.content = formatSummary(search, selected)
-  detailScroll.scrollTop = 0
+
+  summaryText.content = formatSummary(search);
+  riskText.content = formatRisk(search);
+  detailsScroll.scrollTop = 0;
+  updateCanvases();
+
+  setStatus(
+    `Search complete: ${search.result_count} hits in ${search.elapsed_ms} ms.`,
+    search.result_count > 0 ? "success" : "warning",
+  );
 }
 
-function applySelection(option: SelectOption | null): void {
-  const hit = (option?.value ?? null) as DebugHit | null
-  detailText.content = formatDetail(hit)
-  detailPane.title = hit ? `Chunk detail | #${hit.rank}` : "Chunk detail"
-  summaryText.content = formatSummary(currentSearch, hit)
-  detailScroll.scrollTop = 0
+function applyEval(report: DebugEvalResponse | null): void {
+  currentEval = report;
+  evalText.content = formatEval(report);
+  updateCanvases();
+
+  if (report) {
+    setStatus(
+      `Batch eval complete: ${report.num_queries} queries in ${report.elapsed_ms} ms.`,
+      "success",
+    );
+  }
 }
 
-async function fetchJson<T>(path: string, params: Record<string, string>, signal?: AbortSignal): Promise<T> {
-  const url = new URL(path, apiBase)
+async function fetchJson<T>(
+  path: string,
+  params: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const url = new URL(path, apiBase);
+
   for (const [key, value] of Object.entries(params)) {
-    if (value.trim().length > 0) {
-      url.searchParams.set(key, value)
-    }
+    if (value.trim()) url.searchParams.set(key, value);
   }
 
-  const timeout = AbortSignal.timeout(120_000)
-  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
-
-  const response = await fetch(url, { signal: combined })
+  const timeout = AbortSignal.timeout(120_000);
+  const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  const response = await fetch(url, { signal: combined });
 
   if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`${response.status} ${response.statusText}: ${body}`)
+    const body = await response.text();
+    throw new Error(`${response.status} ${response.statusText}: ${body}`);
   }
 
-  return (await response.json()) as T
+  return (await response.json()) as T;
 }
 
 async function runSearch(query: string): Promise<void> {
-  const trimmed = query.trim()
+  const trimmed = query.trim();
   if (!trimmed) {
-    setStatus("enter a query")
-    return
+    setStatus("Type a query first.", "warning");
+    return;
   }
 
-  searchAbort?.abort()
-  searchAbort = new AbortController()
-  const { signal } = searchAbort
+  if (queryHistory.length === 0 || queryHistory[queryHistory.length - 1] !== trimmed) {
+    queryHistory.push(trimmed);
+    if (queryHistory.length > 50) queryHistory.shift();
+  }
+  historyIndex = -1;
 
-  const seq = ++searchSequence
-  setStatus(`searching "${trimmed}"`)
-  summaryText.content = "Running retrieval..."
-  headerStatus.fg = palette.muted
+  searchAbort?.abort();
+  searchAbort = new AbortController();
+  const signal = searchAbort.signal;
+  const seq = ++searchSeq;
+
+  setStatus(`Searching for "${truncate(trimmed, 60)}"…`);
+  summaryText.content = "Searching…";
+  detailsText.content = "  Waiting for /debug/api/search …";
+  resultsList.options = [];
+  resultsCard.title = " Ranking ";
 
   try {
-    const response = await fetchJson<DebugSearchResponse>("/debug/api/search", {
-      q: trimmed,
-      k: "10",
-    }, signal)
-    if (seq !== searchSequence) {
-      return
-    }
-    queryInput.value = trimmed
-    applySearch(response)
-    headerStatus.fg = palette.success
-    setStatus(`ready | ${response.elapsed_ms} ms | ${response.result_count} hits`)
+    const response = await fetchJson<DebugSearchResponse>(
+      "/debug/api/search",
+      { q: trimmed, k: "10" },
+      signal,
+    );
+
+    if (seq !== searchSeq) return;
+    queryInput.value = trimmed;
+    applySearch(response);
+    evalText.content = formatEval(currentEval);
+    focus(0);
   } catch (error) {
-    if (signal.aborted || seq !== searchSequence) {
-      return
-    }
-    const message = error instanceof Error ? error.message : String(error)
-    currentSearch = null
-    resultsList.options = []
-    resultsPane.title = "Ranking | 0 hits"
-    detailText.content = `Search failed.\n\n${message}`
-    detailPane.title = "Chunk detail"
-    summaryText.content = ""
-    headerStatus.fg = palette.danger
-    setStatus("search failed")
+    if (signal.aborted || seq !== searchSeq) return;
+
+    const message = error instanceof Error ? error.message : String(error);
+    currentSearch = null;
+    summaryText.content = "Search failed.";
+    riskText.content = "Search failed.";
+    detailsText.content = [
+      "  Search failed.",
+      "",
+      `  ${message}`,
+      "",
+      "  Make sure the Rust server is running:",
+      "    cargo run --release --bin search_engine",
+    ].join("\n");
+    updateCanvases();
+    setStatus("Search failed. Is the server running?", "warning");
   }
 }
 
-async function loadEvaluation(): Promise<void> {
-  if (!qrelsPath || !queriesPath) {
-    currentEval = null
-    evalText.content = formatEval(null)
-    return
-  }
+async function runEval(): Promise<void> {
+  evalAbort?.abort();
+  evalAbort = new AbortController();
+  const signal = evalAbort.signal;
+  const seq = ++evalSeq;
 
-  const seq = ++evalSequence
-  evalText.content = `Loading evaluation from\n${qrelsPath}\n${queriesPath}`
+  setStatus("Running batch eval…");
+  evalText.content = [
+    "BATCH EVAL  (running…)",
+    `  qrels    ${qrelsPath}`,
+    `  queries  ${queriesPath}`,
+    `  k        ${kValues}`,
+  ].join("\n");
 
   try {
-    const report = await fetchJson<DebugEvalResponse>("/debug/api/eval", {
-      qrels: qrelsPath,
-      queries: queriesPath,
-      k: kValues,
-    })
-    if (seq !== evalSequence) {
-      return
-    }
-    currentEval = report
-    evalText.content = formatEval(report)
-    evalScroll.scrollTop = 0
+    const report = await fetchJson<DebugEvalResponse>(
+      "/debug/api/eval",
+      { qrels: qrelsPath, queries: queriesPath, k: kValues },
+      signal,
+    );
+
+    if (seq !== evalSeq) return;
+    applyEval(report);
   } catch (error) {
-    if (seq !== evalSequence) {
-      return
-    }
-    const message = error instanceof Error ? error.message : String(error)
-    currentEval = null
-    evalText.content = `Evaluation failed.\n\n${message}`
+    if (signal.aborted || seq !== evalSeq) return;
+
+    const message = error instanceof Error ? error.message : String(error);
+    applyEval(null);
+    evalText.content = [
+      "BATCH EVAL  (failed)",
+      `  ${message}`,
+      "",
+      "  Make sure the server is running and that the",
+      "  qrels / query paths exist relative to it.",
+    ].join("\n");
+    setStatus("Eval failed.", "warning");
   }
 }
 
-function cycleFocus(forward: boolean): void {
-  focusRing[focusIndex]?.blur()
-  focusIndex = (focusIndex + (forward ? 1 : -1) + focusRing.length) % focusRing.length
-  focusRing[focusIndex]?.focus()
+function resizeCanvases(): void {
+  const columns = process.stdout.columns || 120;
+  const cardWidth = Math.max(24, Math.floor((columns - 8) / 3));
+
+  if (viewMode === "detail") {
+    resultsCard.width = Math.max(34, Math.min(44, Math.floor(columns * 0.26)));
+  } else {
+    resultsCard.width = Math.max(34, Math.min(52, Math.floor(columns * 0.32)));
+  }
+
+  evalBars.width = Math.max(22, cardWidth - 8);
+  evalBars.height = 4;
+
+  riskBars.width = Math.max(20, cardWidth - 8);
+  riskBars.height = 3;
+
+  updateCanvases();
 }
 
-resultsList.on(SelectRenderableEvents.SELECTION_CHANGED, (_index: number, option: SelectOption) => {
-  applySelection(option)
-})
+function applyTheme(): void {
+  palette = themeMode === "dark" ? DARK : LIGHT;
 
-resultsList.on(SelectRenderableEvents.ITEM_SELECTED, () => {
-  focusRing[focusIndex]?.blur()
-  focusIndex = focusRing.indexOf(detailScroll)
-  detailScroll.focus()
-})
+  app.backgroundColor = palette.BG;
+  mainRow.backgroundColor = palette.BG;
+  bottomRow.backgroundColor = palette.BG;
+
+  for (const card of allCards) {
+    card.backgroundColor =
+      card === statusBar ? palette.SURFACE_RAISED : palette.SURFACE;
+    card.borderColor = palette.BORDER;
+    card.focusedBorderColor = palette.BORDER_VIS;
+  }
+
+  for (const text of allPlainText) {
+    text.fg = palette.TEXT_PRI;
+  }
+
+  headerText.fg = palette.TEXT_SEC;
+  queryHint.fg = palette.TEXT_DIM;
+  helpText.fg = palette.TEXT_PRI;
+  keysText.fg = palette.TEXT_DIM;
+
+  queryInput.backgroundColor = palette.SURFACE_RAISED;
+  queryInput.focusedBackgroundColor = palette.SURFACE_RAISED;
+  queryInput.textColor = palette.TEXT_PRI;
+  queryInput.focusedTextColor = palette.TEXT_DISP;
+  queryInput.placeholderColor = palette.TEXT_DIM;
+  queryInput.cursorColor = palette.TEXT_DISP;
+
+  resultsList.backgroundColor = palette.SURFACE;
+  resultsList.focusedBackgroundColor = palette.SURFACE;
+  resultsList.textColor = palette.TEXT_PRI;
+  resultsList.focusedTextColor = palette.TEXT_PRI;
+  resultsList.selectedBackgroundColor = palette.SURFACE_RAISED;
+  resultsList.selectedTextColor = palette.TEXT_DISP;
+  resultsList.descriptionColor = palette.TEXT_DIM;
+  resultsList.selectedDescriptionColor = palette.TEXT_SEC;
+
+  detailsScroll.backgroundColor = palette.SURFACE;
+  detailsScroll.contentOptions = {
+    flexDirection: "column",
+    padding: 0,
+    backgroundColor: palette.SURFACE,
+  };
+
+  renderStatus();
+  applyViewMode(viewMode);
+  focus(focusedIndex);
+  resizeCanvases();
+}
+
+function toggleTheme(): void {
+  themeMode = themeMode === "dark" ? "light" : "dark";
+  applyTheme();
+  setStatus(`Theme changed to ${themeMode}.`, "success");
+}
+
+function applyViewMode(mode: ViewMode): void {
+  viewMode = mode;
+
+  headerCard.visible = true;
+  queryCard.visible = true;
+  statusBar.visible = true;
+
+  resultsCard.visible = true;
+  detailsCard.visible = true;
+  summaryCard.visible = true;
+  evalCard.visible = true;
+  riskCard.visible = true;
+  helpCard.visible = false;
+
+  mainRow.visible = true;
+  bottomRow.visible = true;
+
+  mainRow.height = "auto";
+  mainRow.flexGrow = 1;
+  bottomRow.height = 14;
+  bottomRow.flexShrink = 0;
+  detailsCard.flexGrow = 1;
+  evalCard.flexGrow = 1;
+  riskCard.flexGrow = 1;
+
+  if (mode === "detail") {
+    helpCard.visible = false;
+    mainRow.visible = true;
+    bottomRow.visible = false;
+    detailsCard.flexGrow = 3;
+    resultsCard.width = Math.max(
+      34,
+      Math.min(44, Math.floor((process.stdout.columns || 120) * 0.26)),
+    );
+  } else if (mode === "metrics") {
+    helpCard.visible = false;
+    mainRow.visible = false;
+    bottomRow.visible = true;
+    bottomRow.height = Math.max(18, (process.stdout.rows || 40) - 14);
+    summaryCard.flexGrow = 1;
+    evalCard.flexGrow = 2;
+    riskCard.flexGrow = 2;
+  } else if (mode === "help") {
+    mainRow.visible = false;
+    bottomRow.visible = false;
+    helpCard.visible = true;
+    helpCard.height = Math.max(14, (process.stdout.rows || 40) - 12);
+  }
+
+  renderStatus();
+  resizeCanvases();
+}
+
+resultsList.on(
+  SelectRenderableEvents.SELECTION_CHANGED,
+  (_index: number, _option: SelectOption) => {
+    detailsText.content = formatDetail(selectedHit());
+    detailsScroll.scrollTop = 0;
+    updateCanvases();
+  },
+);
 
 queryInput.on(InputRenderableEvents.ENTER, (value: string) => {
-  void runSearch(value)
-})
+  void runSearch(value);
+});
 
 renderer.keyInput.on("keypress", (key: KeyEvent) => {
-  if (key.name === "tab") {
-    cycleFocus(!key.shift)
-    return
-  }
-
-  if (key.name === "escape") {
-    renderer.destroy()
-    return
-  }
-
-  if ((key.ctrl && key.name === "l") || key.name === "/") {
-    focusRing[focusIndex]?.blur()
-    focusIndex = 0
-    queryInput.focus()
-    return
-  }
-
-  if (key.ctrl && key.name === "r") {
-    void runSearch(queryInput.value)
-    return
+  if (key.ctrl && key.name === "t") {
+    toggleTheme();
+    return;
   }
 
   if (key.ctrl && key.name === "e") {
-    void loadEvaluation()
+    void runEval();
+    return;
   }
-})
 
-renderer.on("resize", (width: number) => {
-  resizePanels(width)
-})
+  if (key.ctrl && key.name === "r") {
+    void runSearch(queryInput.value);
+    return;
+  }
 
-resizePanels(process.stdout.columns || 160)
-queryInput.focus()
-renderer.start()
-evalText.content = formatEval(currentEval)
-setStatus("ready")
+  if (key.name === "up") {
+    resultsList.moveUp();
+    detailsText.content = formatDetail(selectedHit());
+    detailsScroll.scrollTop = 0;
+    updateCanvases();
+    return;
+  }
 
-await loadEvaluation()
-await runSearch(initialQuery)
+  if (key.name === "down") {
+    resultsList.moveDown();
+    detailsText.content = formatDetail(selectedHit());
+    detailsScroll.scrollTop = 0;
+    updateCanvases();
+    return;
+  }
+
+  if (key.name === "?") {
+    applyViewMode(viewMode === "help" ? "normal" : "help");
+    setStatus(viewMode === "help" ? "Help opened." : "Normal view.", "neutral");
+    return;
+  }
+
+  if (key.name === "n") {
+    applyViewMode("normal");
+    setStatus("Normal view.", "neutral");
+    return;
+  }
+
+  if (key.name === "d") {
+    applyViewMode("detail");
+    setStatus("Detail focus view.", "neutral");
+    return;
+  }
+
+  if (key.name === "m") {
+    applyViewMode("metrics");
+    setStatus("Metrics focus view.", "neutral");
+    return;
+  }
+
+  if (key.name === "tab") {
+    focusNext(key.shift ? -1 : 1);
+    return;
+  }
+
+  if (key.name === "/" && !queryInput.focused) {
+    focus(0);
+    return;
+  }
+
+  if (queryInput.focused && key.ctrl && key.name === "p") {
+    if (historyIndex < queryHistory.length - 1) {
+      if (historyIndex === -1) {
+        historyDraft = queryInput.value;
+      }
+      historyIndex++;
+      queryInput.value = queryHistory[queryHistory.length - 1 - historyIndex];
+    }
+    return;
+  }
+
+  if (queryInput.focused && key.ctrl && key.name === "n") {
+    if (historyIndex > 0) {
+      historyIndex--;
+      queryInput.value = queryHistory[queryHistory.length - 1 - historyIndex];
+    } else if (historyIndex === 0) {
+      historyIndex = -1;
+      queryInput.value = historyDraft;
+    }
+    return;
+  }
+
+  if (key.name === "escape") {
+    if (viewMode === "help") {
+      applyViewMode("normal");
+      setStatus("Help closed.", "neutral");
+      return;
+    }
+    renderer.destroy();
+    return;
+  }
+
+  if (queryInput.focused) {
+    return;
+  }
+
+  if (key.name === "t") {
+    toggleTheme();
+    return;
+  }
+
+  if (key.name === "q") {
+    renderer.destroy();
+    return;
+  }
+
+  if (key.name === "c") {
+    const hit = selectedHit();
+    const url = hit?.source_url || hit?.display_url || "";
+    if (!url) {
+      setStatus("Nothing to copy: no selected result URL.", "warning");
+      return;
+    }
+
+    let proc;
+    const platform = process.platform;
+    if (platform === "darwin") {
+      proc = spawn("pbcopy");
+    } else if (platform === "win32") {
+      proc = spawn("clip");
+    } else if (process.env.WAYLAND_DISPLAY) {
+      proc = spawn("wl-copy");
+    } else {
+      proc = spawn("xclip", ["-selection", "clipboard"]);
+    }
+
+    proc.on("error", () => {
+      setStatus("Copy failed: clipboard utility is unavailable.", "warning");
+    });
+    proc.stdin.write(url);
+    proc.stdin.end();
+    setStatus("Copied selected result URL to clipboard.", "success");
+  }
+});
+
+process.stdout.on("resize", () => {
+  applyViewMode(viewMode);
+});
+renderer.on("resize", () => {
+  applyViewMode(viewMode);
+});
+
+resizeCanvases();
+applyTheme();
+applyEval(null);
+applyViewMode("normal");
+focus(0);
+renderer.start();
+setStatus(
+  "Ready. Type a query and press Enter, or press ? for the help panel.",
+);

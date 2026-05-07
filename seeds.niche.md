@@ -39,6 +39,27 @@ https://muratbuffalo.blogspot.com/
 https://www.cockroachlabs.com/blog/
 https://www.usenix.org/publications/proceedings/
 
+## Missing Canonical URLs (from qrels audit)
+
+https://www.postgresql.org/docs/current/wal-archiving.html
+https://www.postgresql.org/docs/current/indexes-scanning.html
+https://www.postgresql.org/docs/current/indexes-hash.html
+https://www.postgresql.org/docs/current/streaming-replication.html
+https://www.postgresql.org/docs/current/gin-intro.html
+https://www.postgresql.org/docs/high-availability/log-shipping.html
+https://www.postgresql.org/docs/current/runtime-config-wal.html
+https://www.postgresql.org/docs/current/runtime-config-resource.html
+https://www.postgresql.org/docs/current/runtime-config-connection.html
+https://www.postgresql.org/docs/current/wal-configuration.html
+https://sqlite.org/datatype3.html
+https://sqlite.org/withoutrowid.html
+https://sqlite.org/c3ref/autovacuum_pages.html
+https://wiki.postgresql.org/wiki/Work_mem
+https://wiki.postgresql.org/wiki/Maintenance_work_mem
+https://wiki.postgresql.org/wiki/Tuning_Your_PostgreSQL_Server
+https://wiki.postgresql.org/wiki/PgBouncer
+https://wiki.postgresql.org/wiki/Number_Of_Database_Connections
+
 ## Notes
 
 - Keep this corpus narrow for the first pass.
