@@ -3,11 +3,10 @@ rustflags = [
     "-C", "target-cpu=native",
 ]
 
-[env]
-# CUDA libraries path
-LD_LIBRARY_PATH = "/usr/local/cuda-12.6/targets/x86_64-linux/lib:/home/hail/.local/lib/cudnn:/home/hail/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6A14FDE80317F61BCACC6E06FBBF7F609BAEF7FC82BED979D8FE1C4012012247/onnxruntime/lib"
-# ONNX Runtime shared library (downloaded by the ort crate at build time)
-ORT_DYLIB_PATH = "/home/hail/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/6A14FDE80317F61BCACC6E06FBBF7F609BAEF7FC82BED979D8FE1C4012012247/onnxruntime/lib/libonnxruntime.so"
+# NOTE: ONNX Runtime path is set at runtime by the pipeline script
+# (scripts/start_pipeline.sh auto-discovers libonnxruntime.so).
+# Do not hardcode LD_LIBRARY_PATH or ORT_DYLIB_PATH here — they are
+# machine-specific and will break on other hosts.
 
 [alias]
 run-opt = "run --release"
